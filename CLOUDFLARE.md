@@ -12,14 +12,18 @@ uses Workers Builds, not Pages. Do not configure `dist` as static assets or use
 | Repository | `yifangu318-byte/guify` |
 | Production branch | `main` (push only after production approval) |
 | Root directory | `/` |
-| Build command | Leave empty; Wrangler's custom build runs `npm run build` |
+| Build command | `npm run build` (set in Workers Builds, not `wrangler.jsonc`) |
 | Deploy command | `npx wrangler deploy` |
+| Preview command | Default `npx wrangler preview` |
 | Node | `24.x`, already specified by `package.json` |
 | Static output directory / framework preset | Not applicable to this Worker |
 
 Dependencies are installed from the lockfile by Workers Builds. Wrangler is
-pinned locally. `wrangler.jsonc` runs `npm run build` before bundling the
-`workers/entry.js` entry point, which imports the compiled `dist/app.js`.
+pinned locally. Workers Builds does not apply Wrangler's custom-build settings,
+so the dashboard Build command must run `npm run build` before the Deploy
+command bundles `workers/entry.js`, which imports the compiled `dist/app.js`.
+Keep compilation in the dashboard build step; `wrangler.jsonc` only describes
+the Worker entry point and runtime settings.
 `dist/server.js` remains the standalone Node entry point. Wrangler generates and
 uploads a Worker module bundle, not an HTML directory. No assets binding is needed.
 
@@ -33,7 +37,9 @@ timeout: timers cannot complete during module startup. Standalone Node retains
 its original timeout and lifecycle. No business routes have been changed.
 
 Compatibility date is pinned to `2026-10-30`, supported by the installed workerd.
-Node compatibility and startup code generation are available on that date.
+Node compatibility and startup code generation are available on that date. The
+empty `previews` block is required by `wrangler preview`, which Workers Builds
+runs for non-production branches.
 
 ## Local verification (no upload)
 
@@ -66,5 +72,8 @@ Do not retry the production build or push to the connected production branch
 until the user approves deployment.
 
 References:
+- https://developers.cloudflare.com/workers/ci-cd/builds/configuration/
+- https://developers.cloudflare.com/workers/previews/configuration/
+- https://developers.cloudflare.com/workers/wrangler/custom-builds/
 - https://developers.cloudflare.com/workers/runtime-apis/nodejs/http/
 - https://developers.cloudflare.com/workers/configuration/compatibility-flags/
