@@ -12,17 +12,19 @@ uses Workers Builds, not Pages. Do not configure `dist` as static assets or use
 | Repository | `yifangu318-byte/guify` |
 | Production branch | `main` (push only after production approval) |
 | Root directory | `/` |
-| Build command | `npm run build` (set in Workers Builds, not `wrangler.jsonc`) |
-| Deploy command | `npx wrangler deploy` |
-| Preview command | Default `npx wrangler preview` |
+| Production Build command | `npm run build` (set in Workers Builds, not `wrangler.jsonc`) |
+| Production Deploy command | `npx wrangler deploy` |
+| Preview baseline Build command | `npm run build` |
+| Preview baseline deploy command | Default `npx wrangler preview` |
 | Node | `24.x`, already specified by `package.json` |
 | Static output directory / framework preset | Not applicable to this Worker |
 
 Dependencies are installed from the lockfile by Workers Builds. Wrangler is
 pinned locally. Workers Builds does not apply Wrangler's custom-build settings,
-so the dashboard Build command must run `npm run build` before the Deploy
-command bundles `workers/entry.js`, which imports the compiled `dist/app.js`.
-Keep compilation in the dashboard build step; `wrangler.jsonc` only describes
+so the dashboard Build command must run `npm run build` in both the Production
+and Preview baseline settings before the deploy command bundles
+`workers/entry.js`, which imports the compiled `dist/app.js`. Keep compilation
+in the dashboard build step; `wrangler.jsonc` only describes
 the Worker entry point and runtime settings.
 `dist/server.js` remains the standalone Node entry point. Wrangler generates and
 uploads a Worker module bundle, not an HTML directory. No assets binding is needed.
