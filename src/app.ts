@@ -6,27 +6,64 @@ import { registerGatewayRest } from './gateway/rest.js';
 import { createMcpModule } from './gateway/mcp.js';
 import { registerWeb } from './web/routes.js';
 import { WebAuditLog, type WebOptions } from './web/service.js';
+import { handleTikTokCallback } from './tiktok/callback.js';
+import type { D1Binding } from './tiktok/d1.js';
 
-export function buildApp(config: Config, destination?: NodeJS.WritableStream, gatewayOptions: GatewayOptions = {}, webOptions: WebOptions = {}, runtimeOptions: { pluginTimeout?: number } = {}) {
+export type DatabaseHealthStatus = 'configured_verified' | 'configured_unverified' | 'not_configured';
+
+export interface TiktokRuntime {
+  getSecret?: () => string | undefined;
+  getAppKey?: () => string | undefined;
+  getAppSecret?: () => string | undefined;
+  getDb?: () => D1Binding | undefined;
+  fetchImpl?: typeof fetch;
+  now?: () => number;
+}
+
+export interface RuntimeOptions {
+  pluginTimeout?: number;
+  /** Workers 下按请求读取 env.DB 的探针；未提供时回退到 DATABASE_URL 口径。 */
+  databaseHealth?: () => Promise<DatabaseHealthStatus>;
+  tiktok?: TiktokRuntime;
+}
+
+export function buildApp(config: Config, destination?: NodeJS.WritableStream, gatewayOptions: GatewayOptions = {}, webOptions: WebOptions = {}, runtimeOptions: RuntimeOptions = {}) {
   const app = Fastify({
     ...runtimeOptions,
     logger: { level: 'info', stream: createLogStream(destination, { ...process.env, DATABASE_URL: config.databaseUrl }) },
     logController: new LogController({ disableRequestLogging: true }),
   });
-  app.get('/health', async () => ({
-    status: 'ok', service: 'muse-erp', version: '0.1.0',
-    database: { status: config.databaseUrl ? 'configured_unverified' : 'not_configured' },
-  }));
-  app.get<{ Querystring: { code?: unknown; state?: unknown } }>('/api/tiktok/callback', async (request, reply) => {
-    // Presence checks only: no exchange, state verification, storage or logging.
-    // Real authorization and CSRF state verification belong to T10.
-    reply.header('Cache-Control', 'no-store');
-    const { code, state } = request.query;
-    if (typeof code !== 'string' || !code.trim() || typeof state !== 'string' || !state.trim()) {
-      return reply.code(400).send({ error: true, message: 'Invalid callback request', code: 'INVALID_REQUEST' });
+  app.get('/health', async () => {
+    // T10：D1 绑定存在且可读时报 configured_verified；绑定存在但不可读时报
+    // configured_unverified；无绑定且无 DATABASE_URL 时保持 not_configured。
+    // D1 绑定存在绝不等于已连真实店铺，真实店铺连接须另以授权记录为准。
+    let databaseStatus: DatabaseHealthStatus;
+    if (runtimeOptions.databaseHealth) {
+      try {
+        databaseStatus = await runtimeOptions.databaseHealth();
+      } catch {
+        databaseStatus = 'configured_unverified';
+      }
+    } else {
+      databaseStatus = config.databaseUrl ? 'configured_unverified' : 'not_configured';
     }
-    return reply.code(501).send({ error: true, code: 'NOT_IMPLEMENTED',
-      message: 'Placeholder: real code exchange is intentionally not wired yet; it will be completed in T10 after a real callback URL is published.' });
+    return { status: 'ok', service: 'muse-erp', version: '0.1.0', database: { status: databaseStatus } };
+  });
+  app.get<{ Querystring: { code?: unknown; state?: unknown } }>('/api/tiktok/callback', async (request, reply) => {
+    // T10 真实回调：state 校验 + App 凭证检查 + 换 Token + 加密落 D1。
+    // 日志只记事件名与错误码，绝不记录 code / state / Token / 密钥。
+    reply.header('Cache-Control', 'no-store');
+    const tiktok = runtimeOptions.tiktok;
+    const outcome = await handleTikTokCallback(request.query, {
+      secret: tiktok?.getSecret ? tiktok.getSecret() : process.env.TOKEN_ENCRYPTION_KEY,
+      appKey: tiktok?.getAppKey ? tiktok.getAppKey() : process.env.TIKTOK_APP_KEY,
+      appSecret: tiktok?.getAppSecret ? tiktok.getAppSecret() : process.env.TIKTOK_APP_SECRET,
+      db: tiktok?.getDb ? tiktok.getDb() : undefined,
+      ...(tiktok?.fetchImpl ? { fetchImpl: tiktok.fetchImpl } : {}),
+      ...(tiktok?.now ? { now: tiktok.now } : {}),
+    });
+    app.log.info({ event: 'tiktok_callback', outcome: outcome.logEvent, status: outcome.status }, 'TikTok callback handled');
+    return reply.code(outcome.status).send(outcome.body);
   });
   app.setNotFoundHandler((_request, reply) => {
     return reply.code(404).send({ error: true, message: 'Route not found', code: 'NOT_FOUND' });
