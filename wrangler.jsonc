@@ -1,0 +1,13 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "guify",
+  "main": "workers/entry.js",
+  "compatibility_date": "2026-10-30",
+  "compatibility_flags": ["nodejs_compat"],
+  "alias": {
+    "pino": "./node_modules/pino/pino.js"
+  },
+  "build": {
+    "command": "npm run build"
+  }
+}
