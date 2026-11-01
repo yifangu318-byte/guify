@@ -7,7 +7,5 @@
   "alias": {
     "pino": "./node_modules/pino/pino.js"
   },
-  "build": {
-    "command": "npm run build"
-  }
+  "previews": {}
 }
