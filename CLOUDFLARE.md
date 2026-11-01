@@ -25,8 +25,7 @@ so the Production Build command runs `npm run build` before the Production
 deploy command bundles `workers/entry.js`, which imports the compiled
 `dist/app.js`. For Preview baseline, run the same compiler explicitly in the
 deploy command because that build path did not invoke the configured Build
-command. `wrangler.jsonc` describes
-the Worker entry point and runtime settings.
+command. `wrangler.jsonc` describes the Worker entry point and runtime settings.
 `dist/server.js` remains the standalone Node entry point. Wrangler generates and
 uploads a Worker module bundle, not an HTML directory. No assets binding is needed.
 
