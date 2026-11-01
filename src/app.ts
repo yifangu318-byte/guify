@@ -7,8 +7,9 @@ import { createMcpModule } from './gateway/mcp.js';
 import { registerWeb } from './web/routes.js';
 import { WebAuditLog, type WebOptions } from './web/service.js';
 
-export function buildApp(config: Config, destination?: NodeJS.WritableStream, gatewayOptions: GatewayOptions = {}, webOptions: WebOptions = {}) {
+export function buildApp(config: Config, destination?: NodeJS.WritableStream, gatewayOptions: GatewayOptions = {}, webOptions: WebOptions = {}, runtimeOptions: { pluginTimeout?: number } = {}) {
   const app = Fastify({
+    ...runtimeOptions,
     logger: { level: 'info', stream: createLogStream(destination, { ...process.env, DATABASE_URL: config.databaseUrl }) },
     logController: new LogController({ disableRequestLogging: true }),
   });
