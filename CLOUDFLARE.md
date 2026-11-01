@@ -14,18 +14,18 @@ uses Workers Builds, not Pages. Do not configure `dist` as static assets or use
 | Root directory | `/` |
 | Production Build command | `npm run build` (set in Workers Builds, not `wrangler.jsonc`) |
 | Production Deploy command | `npx wrangler deploy` |
-| Preview baseline Build command | Leave empty |
-| Preview baseline deploy command | `npm run build && npx wrangler preview` |
+| Preview baseline Build command | `npm run build` |
+| Preview baseline deploy command | Default `npx wrangler preview` |
 | Node | `24.x`, already specified by `package.json` |
 | Static output directory / framework preset | Not applicable to this Worker |
 
 Dependencies are installed from the lockfile by Workers Builds. Wrangler is
 pinned locally. Workers Builds does not apply Wrangler's custom-build settings,
-so the Production Build command runs `npm run build` before the Production
-deploy command bundles `workers/entry.js`, which imports the compiled
-`dist/app.js`. For Preview baseline, run the same compiler explicitly in the
-deploy command because that build path did not invoke the configured Build
-command. `wrangler.jsonc` describes the Worker entry point and runtime settings.
+so the Production and Preview baseline Build commands must both run
+`npm run build` before their deploy commands bundle `workers/entry.js`, which
+imports the compiled `dist/app.js`. `wrangler.jsonc` describes the Worker entry
+point and runtime settings; Workers Builds does not honor its custom build
+section.
 `dist/server.js` remains the standalone Node entry point. Wrangler generates and
 uploads a Worker module bundle, not an HTML directory. No assets binding is needed.
 
