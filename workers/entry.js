@@ -1,10 +1,41 @@
 import { httpServerHandler } from 'cloudflare:node';
-import { buildApp } from '../dist/app.js';
-import { loadConfig } from '../dist/config.js';
+import { env } from 'cloudflare:workers';
+import { buildApp } from '../src/app.ts';
+import { loadConfig } from '../src/config.ts';
 
 // Reuse the existing routes and logging; Workers owns the HTTP lifecycle.
 // Boot during startup so Fastify can compile its router. Startup cannot run timers.
-const app = buildApp(loadConfig(), undefined, {}, {}, { pluginTimeout: 0 });
+//
+// Workers 说明：
+// - 仍直接导入 src/ 的 TypeScript，由 Wrangler 打包，不回退到依赖本地先生成 dist/ 的旧入口。
+// - D1 绑定变量名 DB、数据库 muse-erp、Secret TOKEN_ENCRYPTION_KEY 均来自 Cloudflare 后台，
+//   不在代码、配置或提交里放任何密钥、Token、App Secret 值。
+// - env 来自 cloudflare:workers，按请求解析；下面的 getter 只在请求处理时读取，
+//   启动阶段不读取 env，因此本地 tsc（只编译 src/）不受影响。
+// - 健康检查：env.DB 存在且 SELECT 1 可读时报 configured_verified；
+//   绑定存在但不可读时报 configured_unverified；无绑定时报 not_configured。
+//   D1 绑定存在绝不等于已连真实店铺。
+const app = buildApp(loadConfig(), undefined, {}, {}, {
+  pluginTimeout: 0,
+  databaseHealth: async () => {
+    try {
+      const db = env.DB;
+      if (!db) return 'not_configured';
+      await db.prepare('SELECT 1 AS ok').first();
+      return 'configured_verified';
+    } catch {
+      return 'configured_unverified';
+    }
+  },
+  tiktok: {
+    getSecret: () => env.TOKEN_ENCRYPTION_KEY,
+    getAppKey: () => env.TIKTOK_APP_KEY,
+    getAppSecret: () => env.TIKTOK_APP_SECRET,
+    getDb: () => env.DB,
+    fetchImpl: fetch,
+    now: Date.now,
+  },
+});
 await app.ready();
 
 export default httpServerHandler(app.server);
