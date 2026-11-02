@@ -66,8 +66,12 @@ the callback placeholder, and concurrent reuse of the server.
 
 No database, real shop credentials, or production environment is needed for
 these checks. Existing demonstration data remains isolate-local and ephemeral.
-The TikTok callback still returns 501 for a supplied code/state; real OAuth,
-PostgreSQL connectivity, and stdio MCP are not validated by this HTTP deployment.
+The TikTok callback no longer returns the old 501 placeholder: T10 implements
+state verification, App-credential checks, real code exchange (endpoint/signing
+per third-party documentation, not yet officially verified), AES-256-GCM
+encryption and D1 storage; see T10-README.md. Real OAuth, D1-backed token
+persistence in production, and stdio MCP are not validated by this HTTP
+deployment until a real authorization is completed and verified.
 Keep secrets in Cloudflare secrets, not committed files. Configure public URL
 and any real integrations separately when those features are implemented.
 

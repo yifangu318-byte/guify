@@ -83,19 +83,20 @@ test('TikTok callback rejects absent and repeated parameters with a generic resp
   }
 });
 
-test('TikTok callback with both parameters returns an unwired placeholder without disclosure', async t => {
+test('TikTok callback with a non-issued state returns state_unverified without disclosure (T10 replaces the old 501 placeholder)', async t => {
   const logs = capture();
-  const app = buildApp(loadConfig({}), logs.stream);
+  // 测试专用合成密钥，非真实密钥；仅用于验签路径，绝不对应任何真实店铺。
+  const app = buildApp(loadConfig({}), logs.stream, {}, {}, { tiktok: { getSecret: () => 'synthetic-test-secret-t10-only' } });
   t.after(() => app.close());
   const response = await app.inject('/api/tiktok/callback?code=synthetic-callback-code&state=synthetic-callback-state');
-  assert.equal(response.statusCode, 501);
+  assert.equal(response.statusCode, 400);
   const body = response.json();
   assert.deepEqual(Object.keys(body).sort(), ['code', 'error', 'message']);
   assert.equal(body.error, true);
-  assert.equal(body.code, 'NOT_IMPLEMENTED');
-  assert.match(body.message, /Placeholder.*intentionally not wired.*T10.*callback URL is published/);
-  assert.ok(!/token|secret/i.test(response.body));
+  assert.equal(body.code, 'STATE_UNVERIFIED');
+  assert.equal(body.message, 'State verification failed');
   assert.ok(!`${response.body}${logs.read()}`.includes('synthetic-callback-'));
+  assert.ok(logs.read().includes('state_unverified'));
   assert.equal(response.headers.location, undefined);
   assert.equal(response.headers['cache-control'], 'no-store');
 });
