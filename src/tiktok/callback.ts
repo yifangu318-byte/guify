@@ -1,6 +1,8 @@
 import { decryptToken, encryptToken, verifyState } from './crypto.js';
 import { ensureShopTokenSchema, getEncryptedShopToken, saveEncryptedShopToken, type D1Binding } from './d1.js';
-import { signDraft } from './signing.js';
+// NOTE: this file must NOT import signDraft. The token/get endpoint (see step 6)
+// takes app_secret as a plain query param and no signature; business-API signing
+// in signing.ts is untouched and still used by client.ts.
 
 /**
  * T10 回调 /api/tiktok/callback 的真实接入逻辑（简体中文注释）。
@@ -12,10 +14,16 @@ import { signDraft } from './signing.js';
  *    绝不记录 code / state 本身；绝不用模拟 Token 冒充真实 Token；
  * 4. 无 TIKTOK_APP_KEY / TIKTOK_APP_SECRET → 503 APP_CREDENTIALS_MISSING，中文明示“未配置应用凭证，无法换 Token”；
  * 5. 无 D1 绑定 → 503 DATABASE_UNAVAILABLE，换到的 Token 无处安全保存时不得宣称授权成功；
- * 6. code 换 Token：真实调用只用环境变量里的 App Key / Secret；端点与签名写法来自仓库
- *    RESEARCH-2026-10-30.md 里记载的第三方资料一致写法（auth.tiktok-shops.com/api/v2/token/get，
- *    GET、HMAC-SHA256 草案签名），尚未获官方文档复核——真实换 Token 成功前不得宣称已接入，
- *    失败时只返回上游错误码类别，不回显上游原始报文、Token 或签名；
+ * 6. code 换 Token（T11 修正，2026-11-02）：真实调用只用环境变量里的 App Key / Secret；
+ *    端点 auth.tiktok-shops.com/api/v2/token/get，GET，查询参数只有
+ *    app_key / app_secret / auth_code / grant_type=authorized_code，不带 sign、不带
+ *    timestamp。此写法为多方第三方资料一致佐证，官方 Partner Center 文档页本次只返回
+ *    登录骨架、未能官方终验——真实换 Token 成功前不得宣称已接入。响应解析兼容两种
+ *    形态：access_token_expire_in 时间戳（秒或毫秒）优先，expires_in 秒数作回退；
+ *    店铺号优先取 data.shops[0].shop_id（v1 单店流程，多店选择留待第四步），回退
+ *    data.shop_id / data.shopId；shop_cipher 本次不存（无 D1 结构变更，留待第四步
+ *    单独的迁移审批）。失败时只返回上游 HTTP 状态与 TikTok 错误码类别，绝不回显
+ *    上游原始报文、授权码、state、Token 或密钥；
  * 7. 成功后：加密落 D1，响应只返回 shop_code / market / expires_at，绝不返回任何 Token。
  *
  * 401 只刷新一次的口径属于 T2 只读适配器的读请求重试（已有测试覆盖），不适用于
@@ -27,9 +35,54 @@ import { signDraft } from './signing.js';
 export interface TokenExchangeResult {
   accessToken: string;
   refreshToken: string;
-  expiresInSec: number;
+  /** Duration fallback (seconds), used only when expiresAtMs is absent (legacy/custom exchanges). */
+  expiresInSec?: number;
+  /** Absolute expiry in Unix milliseconds, preferred when the upstream returns a timestamp. */
+  expiresAtMs?: number;
   shopId?: string;
   scope: string;
+}
+
+/**
+ * Exchange failure carrying only safe diagnostic categories: the upstream HTTP
+ * status (or null on network failure) and the TikTok error code (or a category
+ * string). Never carries an auth code, state, token, secret, sign, message, or body.
+ */
+export class TokenExchangeError extends Error {
+  readonly upstreamHttp: number | null;
+  readonly upstreamCode: number | string;
+  constructor(upstreamHttp: number | null, upstreamCode: number | string) {
+    super('Token exchange failed');
+    this.name = 'TokenExchangeError';
+    this.upstreamHttp = upstreamHttp;
+    this.upstreamCode = upstreamCode;
+  }
+}
+
+function sanitizeUpstreamCode(value: unknown): number | string {
+  if (typeof value === 'number' && Number.isSafeInteger(value)) return value;
+  if (typeof value === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(value)) return value;
+  return 'invalid_response';
+}
+
+function toExpiresAtMs(raw: unknown): number | undefined {
+  if (typeof raw !== 'number' || !Number.isSafeInteger(raw) || raw <= 0) return undefined;
+  // Seconds (< 1e12) vs milliseconds (>= 1e12) timestamp; never treat a duration
+  // as a timestamp here — durations arrive via expires_in and are handled separately.
+  return raw >= 1_000_000_000_000 ? raw : raw * 1000;
+}
+
+function shopIdFromData(data: Record<string, unknown>): string | undefined {
+  const shops = data.shops;
+  if (Array.isArray(shops) && shops.length > 0) {
+    const first = shops[0] as Record<string, unknown>;
+    const id = first?.shop_id ?? first?.shopId;
+    if (typeof id === 'string' && id) return id;
+    if (typeof id === 'number' && Number.isSafeInteger(id)) return String(id);
+  }
+  if (typeof data.shop_id === 'string' && data.shop_id) return data.shop_id;
+  if (typeof data.shopId === 'string' && data.shopId) return data.shopId;
+  return undefined;
 }
 
 export type TokenExchange = (input: { code: string; appKey: string; appSecret: string; nowMs: number }) => Promise<TokenExchangeResult>;
@@ -55,35 +108,75 @@ const invalidRequest = (): CallbackOutcome => ({ status: 400, body: { error: tru
 
 export function createDefaultExchange(fetchImpl: typeof fetch): TokenExchange {
   return async ({ code, appKey, appSecret, nowMs }) => {
-    const timestamp = Math.floor(nowMs / 1000);
     const path = '/api/v2/token/get';
-    const params = { app_key: appKey, auth_code: code, grant_type: 'authorized_code', timestamp: String(timestamp) };
-    const sign = signDraft(path, params, appSecret, timestamp);
-    const query = new URLSearchParams({ ...params, sign });
+    // Plain params only: no sign, no timestamp. app_secret travels as a query
+    // param to the auth host only (server-to-server); it is never logged or echoed.
+    const query = new URLSearchParams({ app_key: appKey, app_secret: appSecret, auth_code: code, grant_type: 'authorized_code' });
     let response: Response;
     try {
       response = await fetchImpl(`https://auth.tiktok-shops.com${path}?${query}`);
     } catch {
-      throw new Error('Token exchange request failed');
+      throw new TokenExchangeError(null, 'network');
     }
-    if (!response.ok) throw new Error('Token exchange failed');
-    let payload: Record<string, unknown>;
+    let payload: Record<string, unknown> | undefined;
     try {
       payload = (await response.json()) as Record<string, unknown>;
     } catch {
-      throw new Error('Token exchange failed');
+      throw new TokenExchangeError(response.status, 'invalid_response');
+    }
+    if (!payload || typeof payload !== 'object') {
+      throw new TokenExchangeError(response.status, 'invalid_response');
+    }
+    // TikTok envelope: code 0 (number or string "0") = success; any other code = failure.
+    // The upstream message/body is deliberately NOT carried forward.
+    if ('code' in payload) {
+      const upstreamCode = payload.code;
+      const isSuccess = upstreamCode === 0 || upstreamCode === '0';
+      if (!isSuccess) {
+        throw new TokenExchangeError(response.status, sanitizeUpstreamCode(upstreamCode));
+      }
+    }
+    if (!response.ok) {
+      throw new TokenExchangeError(response.status, sanitizeUpstreamCode(payload.code ?? 'invalid_response'));
     }
     const data = (payload.data && typeof payload.data === 'object' ? payload.data : payload) as Record<string, unknown>;
     const accessToken = data.access_token;
     const refreshToken = data.refresh_token;
-    const expiresIn = data.expires_in;
-    if (typeof accessToken !== 'string' || !accessToken || typeof refreshToken !== 'string' || !refreshToken || !Number.isSafeInteger(expiresIn) || (expiresIn as number) <= 0) {
-      throw new Error('Token exchange failed');
+    if (typeof accessToken !== 'string' || !accessToken || typeof refreshToken !== 'string' || !refreshToken) {
+      throw new TokenExchangeError(response.status, 'invalid_response');
     }
-    const shopId = typeof data.shop_id === 'string' && data.shop_id ? data.shop_id : typeof data.shopId === 'string' && data.shopId ? data.shopId : undefined;
+    const timestampMs = toExpiresAtMs(data.access_token_expire_in);
+    const expiresIn = data.expires_in;
+    const expiresInSec = typeof expiresIn === 'number' && Number.isSafeInteger(expiresIn) && expiresIn > 0 ? expiresIn : undefined;
+    // Always carry an absolute expiry: timestamp when present, otherwise the
+    // duration converted against nowMs. expiresInSec stays as the duration field.
+    const expiresAtMs = timestampMs ?? (expiresInSec !== undefined ? nowMs + expiresInSec * 1000 : undefined);
+    if (expiresAtMs === undefined) {
+      throw new TokenExchangeError(response.status, 'invalid_response');
+    }
+    const shopId = shopIdFromData(data);
     const scope = Array.isArray(data.scope) ? (data.scope as unknown[]).map(String).join(',') : typeof data.scope === 'string' ? data.scope : '';
-    return { accessToken, refreshToken, expiresInSec: expiresIn as number, ...(shopId ? { shopId } : {}), scope };
+    return {
+      accessToken,
+      refreshToken,
+      ...(expiresInSec !== undefined ? { expiresInSec } : {}),
+      expiresAtMs,
+      ...(shopId ? { shopId } : {}),
+      scope,
+    };
   };
+}
+
+function exchangeDiagnostic(error: unknown): { upstream_http: number | null; upstream_code: number | string } {
+  if (error && typeof error === 'object') {
+    const candidate = error as { upstreamHttp?: unknown; upstreamCode?: unknown };
+    const http = typeof candidate.upstreamHttp === 'number' && Number.isInteger(candidate.upstreamHttp) ? candidate.upstreamHttp : null;
+    const code = typeof candidate.upstreamCode === 'number' || typeof candidate.upstreamCode === 'string' ? sanitizeUpstreamCode(candidate.upstreamCode) : 'invalid_response';
+    // Only trust the pair when it came from TokenExchangeError; a generic error
+    // with stray fields must not fabricate a diagnostic.
+    if (error instanceof TokenExchangeError) return { upstream_http: http, upstream_code: code };
+  }
+  return { upstream_http: null, upstream_code: 'invalid_response' };
 }
 
 export async function handleTikTokCallback(
@@ -119,19 +212,27 @@ export async function handleTikTokCallback(
   let exchanged: TokenExchangeResult;
   try {
     exchanged = await exchange({ code, appKey, appSecret, nowMs });
-  } catch {
-    return { status: 502, body: { error: true, message: 'Token exchange failed', code: 'UPSTREAM_ERROR' }, logEvent: 'exchange_failed' };
+  } catch (error) {
+    const diagnostic = exchangeDiagnostic(error);
+    return { status: 502, body: { error: true, message: 'Token exchange failed', code: 'UPSTREAM_ERROR', ...diagnostic }, logEvent: 'exchange_failed' };
   }
   if (verified.shopCode && exchanged.shopId && verified.shopCode !== exchanged.shopId) {
     return { status: 400, body: { error: true, message: 'Shop mismatch between state and token', code: 'SHOP_MISMATCH' }, logEvent: 'shop_mismatch' };
   }
   const shopCode = verified.shopCode ?? exchanged.shopId;
   if (!shopCode) {
-    return { status: 502, body: { error: true, message: 'Token exchange failed', code: 'UPSTREAM_ERROR' }, logEvent: 'exchange_failed' };
+    return { status: 502, body: { error: true, message: 'Token exchange failed', code: 'UPSTREAM_ERROR', upstream_http: null, upstream_code: 'invalid_response' }, logEvent: 'exchange_failed' };
   }
   // market 未提供时明写 unknown，绝不凭空猜测为某个国家市场。
   const market = verified.market ?? 'unknown';
-  const expiresAt = nowMs + exchanged.expiresInSec * 1000;
+  const expiresAt = typeof exchanged.expiresAtMs === 'number' && Number.isSafeInteger(exchanged.expiresAtMs)
+    ? exchanged.expiresAtMs
+    : typeof exchanged.expiresInSec === 'number' && Number.isSafeInteger(exchanged.expiresInSec) && exchanged.expiresInSec > 0
+      ? nowMs + exchanged.expiresInSec * 1000
+      : NaN;
+  if (!Number.isSafeInteger(expiresAt)) {
+    return { status: 502, body: { error: true, message: 'Token exchange failed', code: 'UPSTREAM_ERROR', upstream_http: null, upstream_code: 'invalid_response' }, logEvent: 'exchange_failed' };
+  }
   try {
     await ensureShopTokenSchema(db);
     await saveEncryptedShopToken(db, {
