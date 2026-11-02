@@ -10,6 +10,7 @@ import { loadConfig } from '../src/config.ts';
 // - 仍直接导入 src/ 的 TypeScript，由 Wrangler 打包，不回退到依赖本地先生成 dist/ 的旧入口。
 // - D1 绑定变量名 DB、数据库 muse-erp、Secret TOKEN_ENCRYPTION_KEY 均来自 Cloudflare 后台，
 //   不在代码、配置或提交里放任何密钥、Token、App Secret 值。
+// - T11 授权接口另读 Dashboard 变量 TIKTOK_SERVICE_ID（非密钥值，仍只放后台，不写进代码）。
 // - env 来自 cloudflare:workers，按请求解析；下面的 getter 只在请求处理时读取，
 //   启动阶段不读取 env，因此本地 tsc（只编译 src/）不受影响。
 // - 健康检查：env.DB 存在且 SELECT 1 可读时报 configured_verified；
@@ -31,6 +32,7 @@ const app = buildApp(loadConfig(), undefined, {}, {}, {
     getSecret: () => env.TOKEN_ENCRYPTION_KEY,
     getAppKey: () => env.TIKTOK_APP_KEY,
     getAppSecret: () => env.TIKTOK_APP_SECRET,
+    getServiceId: () => env.TIKTOK_SERVICE_ID,
     getDb: () => env.DB,
     fetchImpl: fetch,
     now: Date.now,

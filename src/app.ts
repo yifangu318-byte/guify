@@ -7,6 +7,7 @@ import { createMcpModule } from './gateway/mcp.js';
 import { registerWeb } from './web/routes.js';
 import { WebAuditLog, type WebOptions } from './web/service.js';
 import { handleTikTokCallback } from './tiktok/callback.js';
+import { issueState } from './tiktok/crypto.js';
 import type { D1Binding } from './tiktok/d1.js';
 
 export type DatabaseHealthStatus = 'configured_verified' | 'configured_unverified' | 'not_configured';
@@ -15,6 +16,7 @@ export interface TiktokRuntime {
   getSecret?: () => string | undefined;
   getAppKey?: () => string | undefined;
   getAppSecret?: () => string | undefined;
+  getServiceId?: () => string | undefined;
   getDb?: () => D1Binding | undefined;
   fetchImpl?: typeof fetch;
   now?: () => number;
@@ -48,6 +50,35 @@ export function buildApp(config: Config, destination?: NodeJS.WritableStream, ga
       databaseStatus = config.databaseUrl ? 'configured_unverified' : 'not_configured';
     }
     return { status: 'ok', service: 'muse-erp', version: '0.1.0', database: { status: databaseStatus } };
+  });
+  app.get<{ Querystring: { market?: unknown } }>('/api/tiktok/authorize', async (request, reply) => {
+    // T11 authorize: browser navigation entry point only, NOT a Gateway/MCP tool.
+    // Issues an ERP-signed state (market only, no shop_code in v1) and 302-redirects
+    // to the ROW authorize host. Never reads App Key / App Secret here; never logs
+    // state, Service ID, or the full redirect URL.
+    reply.header('Cache-Control', 'no-store');
+    const tiktok = runtimeOptions.tiktok;
+    const marketRaw = request.query.market;
+    const market = typeof marketRaw === 'string' ? marketRaw.trim() : undefined;
+    const allowedMarkets = ['MY', 'PH', 'SG', 'TH', 'VN'];
+    if (!market || !allowedMarkets.includes(market)) {
+      app.log.info({ event: 'tiktok_authorize_invalid_request', status: 400 }, 'TikTok authorize rejected');
+      return reply.code(400).send({ error: true, message: 'Invalid authorize request', code: 'INVALID_REQUEST' });
+    }
+    const secret = tiktok?.getSecret ? tiktok.getSecret() : process.env.TOKEN_ENCRYPTION_KEY;
+    const serviceId = tiktok?.getServiceId ? tiktok.getServiceId() : process.env.TIKTOK_SERVICE_ID;
+    if (!secret?.trim()) {
+      app.log.info({ event: 'tiktok_authorize_missing_config', status: 503 }, 'TikTok authorize rejected');
+      return reply.code(503).send({ error: true, message: 'Token encryption key is not configured; authorize cannot be issued safely.', code: 'TOKEN_ENCRYPTION_KEY_MISSING' });
+    }
+    if (!serviceId?.trim()) {
+      app.log.info({ event: 'tiktok_authorize_missing_config', status: 503 }, 'TikTok authorize rejected');
+      return reply.code(503).send({ error: true, message: 'Service ID is not configured; authorize cannot be issued.', code: 'SERVICE_ID_MISSING' });
+    }
+    const issued = issueState(secret.trim(), { market });
+    const redirectUrl = `https://services.tiktokshop.com/open/authorize?service_id=${encodeURIComponent(serviceId.trim())}&state=${encodeURIComponent(issued.state)}`;
+    app.log.info({ event: 'tiktok_authorize_issued', market, status: 302 }, 'TikTok authorize issued');
+    return reply.code(302).header('Location', redirectUrl).send();
   });
   app.get<{ Querystring: { code?: unknown; state?: unknown } }>('/api/tiktok/callback', async (request, reply) => {
     // T10 真实回调：state 校验 + App 凭证检查 + 换 Token + 加密落 D1。
