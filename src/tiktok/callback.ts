@@ -32,14 +32,24 @@ import { signDraft } from './signing.js';
  *    app_key / timestamp（秒）/ sign（signDraft：secret + path + 有序参数 +
  *    secret 的 HMAC-SHA256，与现有业务签名草案一致），请求头
  *    x-tts-access-token 为刚换到的新 Token；不带 shop_cipher、不带 version
- *    查询参数（version 只在路径里）、不带 shop_id 查询参数。响应 code 为 0 才
+ *    查询参数（version 只在路径里）、不带 shop_id 查询参数。
+ *    配置非空 RELAY_URL 时改为 POST {RELAY_URL}/forward?{原查询串}，签名不变，
+ *    JSON 正文固定为 host=open-api.tiktokglobalshop.com、path=/authorization/202309/shops；
+ *    头带 x-relay-secret（RELAY_SECRET）及原有三个请求头、Content-Type: application/json，
+ *    不跟随重定向。未配置 RELAY_URL 时保留上述直连；配置 URL 但 Secret 缺失或空白
+ *    时以 relay_config_missing 失败，绝不请求。中转 401 / 400 / 502 分别映射为
+ *    relay_unauthorized / relay_bad_target / relay_unavailable，不按店铺正文解析；
+ *    请求中转抛错也为 relay_unavailable，仅附安全构造函数名，不跑直连对照探测。
+ *    直连抛错仍为 shops_fetch_thrown，并仅在此时附无凭证对照探测的 control 字段。
+ *    中转返回的其他响应与直连使用相同的店铺解析规则。响应 code 为 0 才
  *    算成功；data.shops[] 每家店的 id 即店铺号、cipher 即 shop_cipher、code
  *    是本地码（绝不能当店铺号）、region 是市场。选店规则：state 带市场且非
  *    unknown 时优先选 region 等于该市场的店；单店时直接用它；多店且无市场匹
  *    配时失败（绝不随便挑第一家）。shop_cipher 与店铺号、市场一样存明文
  *    TEXT（它本身不是 Token，Token 仍加密存），但绝不出现在任何响应与日志里。
  *    此步失败时只返回上游类别诊断（shops_fetch_thrown / shops_internal_error /
- *    shops_fetch_failed / shops_empty / shops_cipher_missing / shops_no_match），
+ *    shops_fetch_failed / shops_empty / shops_cipher_missing / shops_no_match /
+ *    relay_config_missing / relay_unauthorized / relay_bad_target / relay_unavailable），
  *    异常只附安全的构造函数名，绝不回显上游报文、Token 或 cipher；
  *    补齐失败则不落库，Token 作废、下次重新授权；
  * 7. 成功后：加密落 D1（含 shop_cipher），响应只返回 shop_code / market /
@@ -91,7 +101,7 @@ interface ShopsControlDiagnostic {
  */
 export class AuthorizedShopsError extends Error {
   readonly upstreamHttp: number | null;
-  readonly diagnostic: 'shops_fetch_thrown' | 'shops_fetch_failed' | 'shops_empty' | 'shops_cipher_missing' | 'shops_no_match';
+  readonly diagnostic: 'shops_fetch_thrown' | 'shops_fetch_failed' | 'shops_empty' | 'shops_cipher_missing' | 'shops_no_match' | 'relay_config_missing' | 'relay_unauthorized' | 'relay_bad_target' | 'relay_unavailable';
   readonly upstreamCode: number | string | null;
   readonly upstreamErrorName: string | null;
   declare readonly control_responded?: boolean;
@@ -137,9 +147,15 @@ export async function fetchAuthorizedShops(input: {
   accessToken: string;
   appKey: string;
   appSecret: string;
+  relayUrl?: string | undefined;
+  relaySecret?: string | undefined;
   nowMs: number;
   fetchImpl: typeof fetch;
 }): Promise<AuthorizedShop[]> {
+  const relayUrl = input.relayUrl?.trim();
+  if (relayUrl && !input.relaySecret?.trim()) {
+    throw new AuthorizedShopsError(null, 'relay_config_missing', null);
+  }
   const timestamp = Math.floor(input.nowMs / 1000);
   const path = '/authorization/202309/shops';
   const params = { app_key: input.appKey, timestamp: String(timestamp) };
@@ -151,7 +167,17 @@ export async function fetchAuthorizedShops(input: {
   };
   let response: Response;
   try {
-    response = await input.fetchImpl(`https://open-api.tiktokglobalshop.com${path}?${query}`, {
+    response = relayUrl ? await input.fetchImpl(`${relayUrl.replace(/\/+$/, '')}/forward?${query}`, {
+      method: 'POST',
+      redirect: 'manual',
+      headers: {
+        ...headers,
+        'x-tts-access-token': input.accessToken,
+        'x-relay-secret': input.relaySecret!,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ host: 'open-api.tiktokglobalshop.com', path }),
+    }) : await input.fetchImpl(`https://open-api.tiktokglobalshop.com${path}?${query}`, {
       headers: {
         'x-tts-access-token': input.accessToken,
         ...headers,
@@ -159,6 +185,9 @@ export async function fetchAuthorizedShops(input: {
     });
   } catch (error) {
     const upstreamErrorName = shopsErrorName(error);
+    if (relayUrl) {
+      throw new AuthorizedShopsError(null, 'relay_unavailable', null, upstreamErrorName);
+    }
     let control: ShopsControlDiagnostic;
     try {
       // One credential-free reachability probe, only after the real fetch throws.
@@ -175,6 +204,12 @@ export async function fetchAuthorizedShops(input: {
     }
     // The control result never replaces the original failure or error name.
     throw new AuthorizedShopsError(null, 'shops_fetch_thrown', null, upstreamErrorName, control);
+  }
+  // Relay failures are transport diagnostics, never TikTok shops envelopes.
+  if (relayUrl) {
+    if (response.status === 401) throw new AuthorizedShopsError(401, 'relay_unauthorized', null);
+    if (response.status === 400) throw new AuthorizedShopsError(400, 'relay_bad_target', null);
+    if (response.status === 502) throw new AuthorizedShopsError(502, 'relay_unavailable', null);
   }
   let payload: Record<string, unknown> | undefined;
   try {
@@ -280,6 +315,8 @@ export interface CallbackDeps {
   secret?: string | undefined;
   appKey?: string | undefined;
   appSecret?: string | undefined;
+  relayUrl?: string | undefined;
+  relaySecret?: string | undefined;
   db?: D1Binding | undefined;
   exchange?: TokenExchange | undefined;
   fetchImpl?: typeof fetch | undefined;
@@ -428,6 +465,8 @@ export async function handleTikTokCallback(
         accessToken: exchanged.accessToken,
         appKey,
         appSecret,
+        relayUrl: deps.relayUrl,
+        relaySecret: deps.relaySecret,
         nowMs,
         fetchImpl: deps.fetchImpl,
       });

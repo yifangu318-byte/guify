@@ -32,6 +32,8 @@ const app = buildApp(loadConfig(), undefined, {}, {}, {
     getSecret: () => env.TOKEN_ENCRYPTION_KEY,
     getAppKey: () => env.TIKTOK_APP_KEY,
     getAppSecret: () => env.TIKTOK_APP_SECRET,
+    getRelayUrl: () => env.RELAY_URL,
+    getRelaySecret: () => env.RELAY_SECRET,
     getServiceId: () => env.TIKTOK_SERVICE_ID,
     getDb: () => env.DB,
     fetchImpl: fetch,

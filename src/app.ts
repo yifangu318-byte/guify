@@ -16,6 +16,8 @@ export interface TiktokRuntime {
   getSecret?: () => string | undefined;
   getAppKey?: () => string | undefined;
   getAppSecret?: () => string | undefined;
+  getRelayUrl?: () => string | undefined;
+  getRelaySecret?: () => string | undefined;
   getServiceId?: () => string | undefined;
   getDb?: () => D1Binding | undefined;
   fetchImpl?: typeof fetch;
@@ -89,6 +91,8 @@ export function buildApp(config: Config, destination?: NodeJS.WritableStream, ga
       secret: tiktok?.getSecret ? tiktok.getSecret() : process.env.TOKEN_ENCRYPTION_KEY,
       appKey: tiktok?.getAppKey ? tiktok.getAppKey() : process.env.TIKTOK_APP_KEY,
       appSecret: tiktok?.getAppSecret ? tiktok.getAppSecret() : process.env.TIKTOK_APP_SECRET,
+      relayUrl: tiktok?.getRelayUrl ? tiktok.getRelayUrl() : process.env.RELAY_URL,
+      relaySecret: tiktok?.getRelaySecret ? tiktok.getRelaySecret() : process.env.RELAY_SECRET,
       db: tiktok?.getDb ? tiktok.getDb() : undefined,
       ...(tiktok?.fetchImpl ? { fetchImpl: tiktok.fetchImpl } : {}),
       ...(tiktok?.now ? { now: tiktok.now } : {}),
