@@ -38,8 +38,9 @@ import { signDraft } from './signing.js';
  *    unknown 时优先选 region 等于该市场的店；单店时直接用它；多店且无市场匹
  *    配时失败（绝不随便挑第一家）。shop_cipher 与店铺号、市场一样存明文
  *    TEXT（它本身不是 Token，Token 仍加密存），但绝不出现在任何响应与日志里。
- *    此步失败时只返回上游类别诊断（shops_fetch_failed / shops_empty /
- *    shops_cipher_missing / shops_no_match），绝不回显上游报文、Token 或 cipher；
+ *    此步失败时只返回上游类别诊断（shops_fetch_thrown / shops_internal_error /
+ *    shops_fetch_failed / shops_empty / shops_cipher_missing / shops_no_match），
+ *    异常只附安全的构造函数名，绝不回显上游报文、Token 或 cipher；
  *    补齐失败则不落库，Token 作废、下次重新授权；
  * 7. 成功后：加密落 D1（含 shop_cipher），响应只返回 shop_code / market /
  *    expires_at，绝不返回任何 Token 或 cipher。
@@ -77,20 +78,32 @@ export interface AuthorizedShop {
 /**
  * Authorized-shops failure carrying only safe diagnostics: the upstream HTTP
  * status (or null on network failure), a diagnostic category, and the TikTok
- * error code when one was returned (or null). Never carries a token, cipher,
- * message, or body.
+ * error code when one was returned (or null), and a safe error constructor
+ * name for a thrown fetch. Never carries a token, cipher, upstream message,
+ * stack, URL, or body.
  */
 export class AuthorizedShopsError extends Error {
   readonly upstreamHttp: number | null;
-  readonly diagnostic: 'shops_fetch_failed' | 'shops_empty' | 'shops_cipher_missing' | 'shops_no_match';
+  readonly diagnostic: 'shops_fetch_thrown' | 'shops_fetch_failed' | 'shops_empty' | 'shops_cipher_missing' | 'shops_no_match';
   readonly upstreamCode: number | string | null;
-  constructor(upstreamHttp: number | null, diagnostic: AuthorizedShopsError['diagnostic'], upstreamCode: number | string | null) {
+  readonly upstreamErrorName: string | null;
+  constructor(upstreamHttp: number | null, diagnostic: AuthorizedShopsError['diagnostic'], upstreamCode: number | string | null, upstreamErrorName: string | null = null) {
     super('Authorized shops lookup failed');
     this.name = 'AuthorizedShopsError';
     this.upstreamHttp = upstreamHttp;
     this.diagnostic = diagnostic;
     this.upstreamCode = upstreamCode;
+    this.upstreamErrorName = upstreamErrorName;
   }
+}
+
+function shopsErrorName(error: unknown): string {
+  // Fixed constructor labels only: error.name and custom constructor names
+  // can contain arbitrary text. Never read the thrown value's message/stack.
+  for (const constructor of [DOMException, TypeError, RangeError, ReferenceError, SyntaxError, URIError, EvalError, AggregateError, Error]) {
+    if (error instanceof constructor) return constructor.name;
+  }
+  return 'UnknownError';
 }
 
 function authorizedShopId(value: unknown): string | undefined {
@@ -122,8 +135,8 @@ export async function fetchAuthorizedShops(input: {
     response = await input.fetchImpl(`https://open-api.tiktokglobalshop.com${path}?${query}`, {
       headers: { 'x-tts-access-token': input.accessToken },
     });
-  } catch {
-    throw new AuthorizedShopsError(null, 'shops_fetch_failed', null);
+  } catch (error) {
+    throw new AuthorizedShopsError(null, 'shops_fetch_thrown', null, shopsErrorName(error));
   }
   let payload: Record<string, unknown> | undefined;
   try {
@@ -391,11 +404,12 @@ export async function handleTikTokCallback(
             upstream_http: error.upstreamHttp,
             upstream_code: error.diagnostic,
             ...(error.upstreamCode !== null ? { upstream_tiktok_code: error.upstreamCode } : {}),
+            ...(error.upstreamErrorName !== null ? { upstream_error_name: error.upstreamErrorName } : {}),
           },
           logEvent: 'exchange_failed',
         };
       }
-      return { status: 502, body: { error: true, message: 'Authorized shops lookup failed', code: 'UPSTREAM_ERROR', upstream_http: null, upstream_code: 'shops_fetch_failed' }, logEvent: 'exchange_failed' };
+      return { status: 502, body: { error: true, message: 'Authorized shops lookup failed', code: 'UPSTREAM_ERROR', upstream_http: null, upstream_code: 'shops_internal_error', upstream_error_name: shopsErrorName(error) }, logEvent: 'exchange_failed' };
     }
     const selected = selectAuthorizedShop(shops, verified.market);
     if (!selected) {
