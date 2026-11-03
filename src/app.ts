@@ -100,6 +100,55 @@ export function buildApp(config: Config, destination?: NodeJS.WritableStream, ga
     app.log.info({ event: 'tiktok_callback', outcome: outcome.logEvent, status: outcome.status }, 'TikTok callback handled');
     return reply.code(outcome.status).send(outcome.body);
   });
+  app.get('/api/tiktok/diag-fetch', async (_request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    const tiktok = runtimeOptions.tiktok;
+    const fetchImpl = tiktok?.fetchImpl ?? fetch;
+    const timestamp = Math.floor((tiktok?.now ?? Date.now)() / 1000);
+    const relayUrl = (tiktok?.getRelayUrl ? tiktok.getRelayUrl() : process.env.RELAY_URL)?.trim().replace(/\/+$/, '');
+    const authUrl = 'https://auth.tiktok-shops.com/api/v2/token/get?app_key=diag-fake&app_secret=diag-fake&auth_code=diag-fake&grant_type=authorized_code';
+    const shopsQuery = `app_key=diag-fake&timestamp=${timestamp}&sign=diag-fake`;
+    const shopsUrl = `https://open-api.tiktokglobalshop.com/authorization/202309/shops?${shopsQuery}`;
+    const headers = {
+      Accept: 'application/json',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    };
+    // Fixed synthetic inputs only. Never read credentials or upstream bodies.
+    const definitions: Array<{ id: string; url: string | undefined; init: RequestInit }> = [
+      { id: 'auth-no-headers', url: authUrl, init: { method: 'GET' } },
+      { id: 'shops-no-headers', url: shopsUrl, init: { method: 'GET' } },
+      { id: 'shops-headers', url: shopsUrl, init: { method: 'GET', headers } },
+      { id: 'relay-health-no-headers', url: relayUrl ? `${relayUrl}/health` : undefined, init: { method: 'GET' } },
+      {
+        id: 'relay-forward-fake-secret', url: relayUrl ? `${relayUrl}/forward?${shopsQuery}` : undefined,
+        init: {
+          method: 'POST',
+          headers: { ...headers, 'x-tts-access-token': 'diag-fake', 'x-relay-secret': 'diag-fake', 'Content-Type': 'application/json' },
+          body: '{"host":"open-api.tiktokglobalshop.com","path":"/authorization/202309/shops"}',
+        },
+      },
+      { id: 'auth-headers', url: authUrl, init: { method: 'GET', headers } },
+    ];
+    const probes: Array<{ id: string; responded: boolean; http: number | null; threw: string | null; skipped: boolean }> = [];
+    for (const { id, url, init } of definitions) {
+      if (url === undefined) {
+        probes.push({ id, responded: false, http: null, threw: null, skipped: true });
+        continue;
+      }
+      try {
+        // Report the first HTTP response, including redirects and relay 401s.
+        const response = await fetchImpl(url, { ...init, redirect: 'manual' });
+        probes.push({ id, responded: true, http: response.status, threw: null, skipped: false });
+      } catch (error) {
+        // Built-in constructor labels cannot disclose error.name/message/stack
+        // or arbitrary text from a custom constructor name.
+        const constructor = [DOMException, TypeError, RangeError, ReferenceError, SyntaxError, URIError, EvalError, AggregateError, Error]
+          .find(candidate => error instanceof candidate);
+        probes.push({ id, responded: false, http: null, threw: constructor?.name ?? 'UnknownError', skipped: false });
+      }
+    }
+    return { probes };
+  });
   app.setNotFoundHandler((_request, reply) => {
     return reply.code(404).send({ error: true, message: 'Route not found', code: 'NOT_FOUND' });
   });
