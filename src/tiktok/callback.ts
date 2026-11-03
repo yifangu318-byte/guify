@@ -85,10 +85,18 @@ export interface AuthorizedShop {
   region?: string;
 }
 
+interface ShopsProbeDiagnostic {
+  responded: boolean;
+  http: number | null;
+  threw: string | null;
+}
+
 interface ShopsControlDiagnostic {
   control_responded: boolean;
   control_http: number | null;
   control_threw_name: string | null;
+  bisect_known_host?: ShopsProbeDiagnostic;
+  bisect_bare_fetch?: ShopsProbeDiagnostic;
 }
 
 /**
@@ -107,6 +115,8 @@ export class AuthorizedShopsError extends Error {
   declare readonly control_responded?: boolean;
   declare readonly control_http?: number | null;
   declare readonly control_threw_name?: string | null;
+  declare readonly bisect_known_host?: ShopsProbeDiagnostic;
+  declare readonly bisect_bare_fetch?: ShopsProbeDiagnostic;
   constructor(upstreamHttp: number | null, diagnostic: AuthorizedShopsError['diagnostic'], upstreamCode: number | string | null, upstreamErrorName: string | null = null, control?: ShopsControlDiagnostic) {
     super('Authorized shops lookup failed');
     this.name = 'AuthorizedShopsError';
@@ -118,6 +128,8 @@ export class AuthorizedShopsError extends Error {
       this.control_responded = control.control_responded;
       this.control_http = control.control_http;
       this.control_threw_name = control.control_threw_name;
+      if (control.bisect_known_host) this.bisect_known_host = control.bisect_known_host;
+      if (control.bisect_bare_fetch) this.bisect_bare_fetch = control.bisect_bare_fetch;
     }
   }
 }
@@ -189,18 +201,32 @@ export async function fetchAuthorizedShops(input: {
       throw new AuthorizedShopsError(null, 'relay_unavailable', null, upstreamErrorName);
     }
     let control: ShopsControlDiagnostic;
+    const controlQuery = new URLSearchParams({
+      app_key: 'synthetic-control-app-key',
+      timestamp: String(timestamp),
+      sign: 'synthetic-control-sign',
+    });
+    const controlUrl = `https://open-api.tiktokglobalshop.com${path}?${controlQuery}`;
     try {
       // One credential-free reachability probe, only after the real fetch throws.
       // Deliberately fake key/sign: never sign this request or read its body.
-      const controlQuery = new URLSearchParams({
-        app_key: 'synthetic-control-app-key',
-        timestamp: String(timestamp),
-        sign: 'synthetic-control-sign',
-      });
-      const controlResponse = await input.fetchImpl(`https://open-api.tiktokglobalshop.com${path}?${controlQuery}`, { headers });
+      const controlResponse = await input.fetchImpl(controlUrl, { headers });
       control = { control_responded: true, control_http: controlResponse.status, control_threw_name: null };
     } catch (controlError) {
       control = { control_responded: false, control_http: null, control_threw_name: shopsErrorName(controlError) };
+    }
+    // These credential-free probes read only status, never response bodies.
+    try {
+      const knownHostResponse = await input.fetchImpl('https://example.com/', { method: 'GET', redirect: 'manual' });
+      control.bisect_known_host = { responded: true, http: knownHostResponse.status, threw: null };
+    } catch (knownHostError) {
+      control.bisect_known_host = { responded: false, http: null, threw: shopsErrorName(knownHostError) };
+    }
+    try {
+      const bareFetchResponse = await globalThis.fetch(controlUrl, { headers });
+      control.bisect_bare_fetch = { responded: true, http: bareFetchResponse.status, threw: null };
+    } catch (bareFetchError) {
+      control.bisect_bare_fetch = { responded: false, http: null, threw: shopsErrorName(bareFetchError) };
     }
     // The control result never replaces the original failure or error name.
     throw new AuthorizedShopsError(null, 'shops_fetch_thrown', null, upstreamErrorName, control);
@@ -486,6 +512,8 @@ export async function handleTikTokCallback(
               control_responded: error.control_responded,
               control_http: error.control_http,
               control_threw_name: error.control_threw_name,
+              bisect_known_host: error.bisect_known_host,
+              bisect_bare_fetch: error.bisect_bare_fetch,
             } : {}),
           },
           logEvent: 'exchange_failed',
