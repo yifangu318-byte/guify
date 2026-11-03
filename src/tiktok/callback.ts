@@ -21,7 +21,8 @@ import { ensureShopTokenSchema, getEncryptedShopToken, saveEncryptedShopToken, t
  *    登录骨架、未能官方终验——真实换 Token 成功前不得宣称已接入。响应解析兼容两种
  *    形态：access_token_expire_in 时间戳（秒或毫秒）优先，expires_in 秒数作回退；
  *    店铺号优先取 data.shops[0].shop_id（v1 单店流程，多店选择留待第四步），回退
- *    data.shop_id / data.shopId；shop_cipher 本次不存（无 D1 结构变更，留待第四步
+ *    data.shop_id / data.shopId（字符串或安全整数，数字形式转字符串；只认同名字段，
+ *    绝不拿 seller_id、open_id 或本地店铺码冒充店铺号）；shop_cipher 本次不存（无 D1 结构变更，留待第四步
  *    单独的迁移审批）。失败时只返回上游 HTTP 状态与 TikTok 错误码类别，绝不回显
  *    上游原始报文、授权码、state、Token 或密钥；
  * 7. 成功后：加密落 D1，响应只返回 shop_code / market / expires_at，绝不返回任何 Token。
@@ -81,7 +82,9 @@ function shopIdFromData(data: Record<string, unknown>): string | undefined {
     if (typeof id === 'number' && Number.isSafeInteger(id)) return String(id);
   }
   if (typeof data.shop_id === 'string' && data.shop_id) return data.shop_id;
+  if (typeof data.shop_id === 'number' && Number.isSafeInteger(data.shop_id)) return String(data.shop_id);
   if (typeof data.shopId === 'string' && data.shopId) return data.shopId;
+  if (typeof data.shopId === 'number' && Number.isSafeInteger(data.shopId)) return String(data.shopId);
   return undefined;
 }
 
@@ -176,7 +179,10 @@ function exchangeDiagnostic(error: unknown): { upstream_http: number | null; ups
     // with stray fields must not fabricate a diagnostic.
     if (error instanceof TokenExchangeError) return { upstream_http: http, upstream_code: code };
   }
-  return { upstream_http: null, upstream_code: 'invalid_response' };
+  // Generic (non-TokenExchangeError) exchange failure: distinct from TokenExchangeError
+  // categories (network / invalid_response / TikTok code) so it is never confused
+  // with a shop-missing or expires-missing outcome below.
+  return { upstream_http: null, upstream_code: 'exchange_error' };
 }
 
 export async function handleTikTokCallback(
@@ -221,7 +227,7 @@ export async function handleTikTokCallback(
   }
   const shopCode = verified.shopCode ?? exchanged.shopId;
   if (!shopCode) {
-    return { status: 502, body: { error: true, message: 'Token exchange failed', code: 'UPSTREAM_ERROR', upstream_http: null, upstream_code: 'invalid_response' }, logEvent: 'exchange_failed' };
+    return { status: 502, body: { error: true, message: 'Token exchange failed', code: 'UPSTREAM_ERROR', upstream_http: null, upstream_code: 'shop_missing' }, logEvent: 'exchange_failed' };
   }
   // market 未提供时明写 unknown，绝不凭空猜测为某个国家市场。
   const market = verified.market ?? 'unknown';
@@ -231,7 +237,7 @@ export async function handleTikTokCallback(
       ? nowMs + exchanged.expiresInSec * 1000
       : NaN;
   if (!Number.isSafeInteger(expiresAt)) {
-    return { status: 502, body: { error: true, message: 'Token exchange failed', code: 'UPSTREAM_ERROR', upstream_http: null, upstream_code: 'invalid_response' }, logEvent: 'exchange_failed' };
+    return { status: 502, body: { error: true, message: 'Token exchange failed', code: 'UPSTREAM_ERROR', upstream_http: null, upstream_code: 'expires_missing' }, logEvent: 'exchange_failed' };
   }
   try {
     await ensureShopTokenSchema(db);
