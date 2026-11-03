@@ -133,7 +133,11 @@ export async function fetchAuthorizedShops(input: {
   let response: Response;
   try {
     response = await input.fetchImpl(`https://open-api.tiktokglobalshop.com${path}?${query}`, {
-      headers: { 'x-tts-access-token': input.accessToken },
+      headers: {
+        'x-tts-access-token': input.accessToken,
+        Accept: 'application/json',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      },
     });
   } catch (error) {
     throw new AuthorizedShopsError(null, 'shops_fetch_thrown', null, shopsErrorName(error));
