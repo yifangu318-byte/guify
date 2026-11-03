@@ -113,7 +113,7 @@ export function buildApp(config: Config, destination?: NodeJS.WritableStream, ga
       Accept: 'application/json',
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     };
-    // Fixed synthetic inputs only. Never read credentials or upstream bodies.
+    // These six probes use fixed synthetic inputs and never read upstream bodies.
     const definitions: Array<{ id: string; url: string | undefined; init: RequestInit }> = [
       { id: 'auth-no-headers', url: authUrl, init: { method: 'GET' } },
       { id: 'shops-no-headers', url: shopsUrl, init: { method: 'GET' } },
@@ -147,7 +147,33 @@ export function buildApp(config: Config, destination?: NodeJS.WritableStream, ga
         probes.push({ id, responded: false, http: null, threw: constructor?.name ?? 'UnknownError', skipped: false });
       }
     }
-    return { probes };
+    // Keep the original six probes unchanged. These two isolate request defaults
+    // and a preceding JSON parse using synthetic credentials only.
+    const mimicProbes: Array<{ id: string; responded: boolean; http: number | null; threw: string | null }> = [];
+    const runMimicProbe = async (id: string, url: string, init: RequestInit) => {
+      try {
+        const response = await fetchImpl(url, init);
+        mimicProbes.push({ id, responded: true, http: response.status, threw: null });
+      } catch (error) {
+        const constructor = [DOMException, TypeError, RangeError, ReferenceError, SyntaxError, URIError, EvalError, AggregateError, Error]
+          .find(candidate => error instanceof candidate);
+        mimicProbes.push({ id, responded: false, http: null, threw: constructor?.name ?? 'UnknownError' });
+      }
+    };
+    const controlQuery = new URLSearchParams({
+      app_key: 'synthetic-control-app-key',
+      timestamp: String(timestamp),
+      sign: 'synthetic-control-sign',
+    });
+    await runMimicProbe('control-mimic', `https://open-api.tiktokglobalshop.com/authorization/202309/shops?${controlQuery}`, { headers });
+    try {
+      const response = await fetchImpl(authUrl, { method: 'GET', redirect: 'manual' });
+      // Sole body-reading exception: parse the fake token error, immediately
+      // discard its value, and never expose parse/fetch errors or block shops.
+      await response.json();
+    } catch { /* A failed warm-up must not affect the following shops probe. */ }
+    await runMimicProbe('callback-flow-mimic', shopsUrl, { method: 'GET', redirect: 'manual', headers });
+    return { probes: [...probes, ...mimicProbes] };
   });
   app.setNotFoundHandler((_request, reply) => {
     return reply.code(404).send({ error: true, message: 'Route not found', code: 'NOT_FOUND' });

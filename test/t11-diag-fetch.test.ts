@@ -15,6 +15,8 @@ const HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
 };
 const IDS = ['auth-no-headers', 'shops-no-headers', 'shops-headers', 'relay-health-no-headers', 'relay-forward-fake-secret', 'auth-headers'];
+const MIMIC_IDS = ['control-mimic', 'callback-flow-mimic'];
+const CONTROL_URL = `https://open-api.tiktokglobalshop.com/authorization/202309/shops?app_key=synthetic-control-app-key&timestamp=${Math.floor(NOW / 1000)}&sign=synthetic-control-sign`;
 
 function fixture(fetchImpl: typeof fetch, overrides: Partial<TiktokRuntime> = {}) {
   let logs = '';
@@ -53,7 +55,7 @@ test('T11 diag-fetch: six fixed probes run sequentially, report HTTP only, and n
     await Promise.resolve();
     active--;
     return {
-      status: statuses[index], ...bodies[index],
+      status: statuses[index] ?? 400, ...bodies[index],
       get body() { assert.fail('must not access upstream body'); },
       get ok() { assert.fail('only status is needed'); },
       get headers() { assert.fail('must not inspect upstream headers'); },
@@ -63,14 +65,17 @@ test('T11 diag-fetch: six fixed probes run sequentially, report HTTP only, and n
   const response = await app.inject('/api/tiktok/diag-fetch');
   assert.equal(response.statusCode, 200);
   assert.equal(response.headers['cache-control'], 'no-store');
-  assert.deepEqual(response.json(), { probes: IDS.map((id, i) => responded(id, statuses[i]!)) });
+  assert.deepEqual(response.json(), { probes: [
+    ...IDS.map((id, i) => responded(id, statuses[i]!)),
+    ...MIMIC_IDS.map(id => ({ id, responded: true, http: 400, threw: null })),
+  ] });
   assert.equal(maxActive, 1);
-  assert.deepEqual(requests.map(request => request.url), [AUTH_URL, SHOPS_URL, SHOPS_URL, `${RELAY_URL}/health`, `${RELAY_URL}/forward?${QUERY}`, AUTH_URL]);
+  assert.deepEqual(requests.map(request => request.url), [AUTH_URL, SHOPS_URL, SHOPS_URL, `${RELAY_URL}/health`, `${RELAY_URL}/forward?${QUERY}`, AUTH_URL, CONTROL_URL, AUTH_URL, SHOPS_URL]);
   for (const [index, request] of requests.entries()) {
-    assert.equal(request.init?.method, index === 4 ? 'POST' : 'GET');
-    assert.equal(request.init?.redirect, 'manual');
+    assert.equal(request.init?.method, index === 6 ? undefined : index === 4 ? 'POST' : 'GET');
+    assert.equal(request.init?.redirect, index === 6 ? undefined : 'manual');
     if ([0, 1, 3].includes(index)) assert.equal(request.init?.headers, undefined);
-    if ([2, 5].includes(index)) assert.deepEqual(request.init?.headers, HEADERS);
+    if ([2, 5, 6, 8].includes(index)) assert.deepEqual(request.init?.headers, HEADERS);
     if (index !== 4) assert.equal(request.init?.body, undefined);
   }
   assert.deepEqual(requests[4]?.init?.headers, {
@@ -100,9 +105,12 @@ test('T11 diag-fetch: thrown fetches retain only safe constructor names and all 
   t.after(() => app.close());
   const response = await app.inject('/api/tiktok/diag-fetch');
   assert.equal(response.statusCode, 200);
-  assert.equal(calls, 6);
+  assert.equal(calls, 9);
   const names = ['TypeError', 'RangeError', 'DOMException', 'Error', 'Error', 'SyntaxError'];
-  assert.deepEqual(response.json(), { probes: IDS.map((id, i) => ({ id, responded: false, http: null, threw: names[i], skipped: false })) });
+  assert.deepEqual(response.json(), { probes: [
+    ...IDS.map((id, i) => ({ id, responded: false, http: null, threw: names[i], skipped: false })),
+    ...MIMIC_IDS.map(id => ({ id, responded: false, http: null, threw: 'UnknownError' })),
+  ] });
   assert.doesNotMatch(response.body + readLogs(), /synthetic|message|stack|https?:/i);
 });
 
@@ -114,10 +122,10 @@ test('T11 diag-fetch: a thrown probe does not prevent later HTTP responses', asy
   });
   t.after(() => app.close());
   const response = await app.inject('/api/tiktok/diag-fetch');
-  assert.equal(calls, 6);
-  assert.deepEqual(response.json(), { probes: IDS.map((id, i) => i === 2
+  assert.equal(calls, 9);
+  assert.deepEqual(response.json(), { probes: [...IDS.map((id, i) => i === 2
     ? { id, responded: false, http: null, threw: 'TypeError', skipped: false }
-    : responded(id, 401)) });
+    : responded(id, 401)), ...MIMIC_IDS.map(id => ({ id, responded: true, http: 401, threw: null }))] });
 });
 
 for (const value of ['synthetic-private-thrown-value', null]) {
@@ -125,7 +133,10 @@ for (const value of ['synthetic-private-thrown-value', null]) {
     const { app } = fixture(async () => { throw value; });
     t.after(() => app.close());
     const response = await app.inject('/api/tiktok/diag-fetch');
-    assert.deepEqual(response.json(), { probes: IDS.map(id => ({ id, responded: false, http: null, threw: 'UnknownError', skipped: false })) });
+    assert.deepEqual(response.json(), { probes: [
+      ...IDS.map(id => ({ id, responded: false, http: null, threw: 'UnknownError', skipped: false })),
+      ...MIMIC_IDS.map(id => ({ id, responded: false, http: null, threw: 'UnknownError' })),
+    ] });
   });
 }
 
@@ -139,8 +150,11 @@ for (const relayUrl of [undefined, '', ' \t\n ']) {
     t.after(() => app.close());
     const response = await app.inject('/api/tiktok/diag-fetch');
     assert.equal(response.statusCode, 200);
-    assert.deepEqual(response.json(), { probes: IDS.map(id => id.startsWith('relay-') ? skipped(id) : responded(id, 400)) });
-    assert.deepEqual(urls, [AUTH_URL, SHOPS_URL, SHOPS_URL, AUTH_URL]);
+    assert.deepEqual(response.json(), { probes: [
+      ...IDS.map(id => id.startsWith('relay-') ? skipped(id) : responded(id, 400)),
+      ...MIMIC_IDS.map(id => ({ id, responded: true, http: 400, threw: null })),
+    ] });
+    assert.deepEqual(urls, [AUTH_URL, SHOPS_URL, SHOPS_URL, AUTH_URL, CONTROL_URL, AUTH_URL, SHOPS_URL]);
   });
 }
 
@@ -158,7 +172,10 @@ for (const relayUrl of [undefined, ` \t${RELAY_URL}/ `]) {
     try {
       const response = await app.inject('/api/tiktok/diag-fetch');
       assert.equal(response.statusCode, 200);
-      assert.deepEqual(response.json(), { probes: IDS.map(id => !relayUrl && id.startsWith('relay-') ? skipped(id) : responded(id, 401)) });
+      assert.deepEqual(response.json(), { probes: [
+        ...IDS.map(id => !relayUrl && id.startsWith('relay-') ? skipped(id) : responded(id, 401)),
+        ...MIMIC_IDS.map(id => ({ id, responded: true, http: 401, threw: null })),
+      ] });
       if (relayUrl) {
         assert.equal(requests[3]?.url, `${RELAY_URL}/health`);
         assert.equal(requests[4]?.url, `${RELAY_URL}/forward?${QUERY}`);
@@ -190,3 +207,119 @@ test('T11 diag-fetch: query strings and incoming headers cannot change probe inp
   assert.deepEqual(requests, baseline);
   assert.doesNotMatch(response.body + readLogs(), /synthetic-input/);
 });
+
+test('T11 diag-fetch: control-mimic uses the callback query and headers with no method or redirect fields', async t => {
+  const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
+  const bodies = Array.from({ length: 9 }, () => ({
+    json: mock.fn(async () => ({ message: 'synthetic-private-body' })),
+    text: mock.fn(async () => 'synthetic-private-body'),
+  }));
+  const { app, readLogs } = fixture(async (url, init) => {
+    const index = requests.length;
+    requests.push({ url: String(url), init });
+    return { status: index === 6 ? 403 : 400, ...bodies[index] } as unknown as Response;
+  });
+  t.after(() => app.close());
+  const response = await app.inject('/api/tiktok/diag-fetch');
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.headers['cache-control'], 'no-store');
+  assert.equal(requests.length, 9);
+  const control = requests[6]!;
+  const query = new URLSearchParams({
+    app_key: 'synthetic-control-app-key',
+    timestamp: String(Math.floor(NOW / 1000)),
+    sign: 'synthetic-control-sign',
+  });
+  assert.equal(control.url, `https://open-api.tiktokglobalshop.com/authorization/202309/shops?${query}`);
+  assert.deepEqual(control.init, { headers: HEADERS });
+  assert.equal(Object.hasOwn(control.init!, 'method'), false);
+  assert.equal(Object.hasOwn(control.init!, 'redirect'), false);
+  assert.deepEqual(response.json().probes[6], { id: 'control-mimic', responded: true, http: 403, threw: null });
+  for (const [index, body] of bodies.entries()) {
+    assert.equal(body.json.mock.callCount(), index === 7 ? 1 : 0);
+    assert.equal(body.text.mock.callCount(), 0);
+  }
+  assert.doesNotMatch(response.body + readLogs(), /synthetic-private-body/);
+});
+
+test('T11 diag-fetch: callback-flow-mimic awaits fake token JSON before shops and discards all parsed content', async t => {
+  const events: string[] = [];
+  const parsed = { access_token: 'synthetic-private-parsed-token', message: 'synthetic-private-parsed-message' };
+  const json = mock.fn(async () => {
+    events.push('parse-start');
+    await Promise.resolve();
+    events.push('parse-end');
+    return parsed;
+  });
+  let calls = 0;
+  const fetchMock = mock.fn(async (url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const index = calls++;
+    if (index === 7) {
+      events.push('auth');
+      return { json, get status() { assert.fail('warm-up HTTP status must not be read'); } } as unknown as Response;
+    }
+    if (index === 8) events.push('shops');
+    return { status: index === 8 ? 429 : 400 } as Response;
+  });
+  const { app, readLogs } = fixture(fetchMock);
+  t.after(() => app.close());
+  const response = await app.inject('/api/tiktok/diag-fetch');
+  assert.equal(response.statusCode, 200);
+  assert.equal(fetchMock.mock.callCount(), 9);
+  assert.deepEqual(fetchMock.mock.calls[7]!.arguments, [AUTH_URL, { method: 'GET', redirect: 'manual' }]);
+  assert.deepEqual(fetchMock.mock.calls[8]!.arguments, [SHOPS_URL, { method: 'GET', redirect: 'manual', headers: HEADERS }]);
+  assert.deepEqual(events, ['auth', 'parse-start', 'parse-end', 'shops']);
+  assert.equal(json.mock.callCount(), 1);
+  assert.deepEqual(response.json().probes[7], { id: 'callback-flow-mimic', responded: true, http: 429, threw: null });
+  assert.doesNotMatch(response.body + readLogs(), /synthetic-private-parsed|access_token|message/);
+});
+
+for (const failure of ['json', 'fetch']) {
+  test(`T11 diag-fetch: callback-flow-mimic ignores fake token ${failure} failures and still probes shops`, async t => {
+    let calls = 0;
+    const json = mock.fn(async () => { throw new SyntaxError('synthetic-private-parse-error'); });
+    const { app, readLogs } = fixture(async () => {
+      const index = calls++;
+      if (index === 7) {
+        if (failure === 'fetch') throw new TypeError('synthetic-private-token-fetch-error');
+        return { json } as unknown as Response;
+      }
+      return { status: index === 8 ? 401 : 400 } as Response;
+    });
+    t.after(() => app.close());
+    const response = await app.inject('/api/tiktok/diag-fetch');
+    assert.equal(response.statusCode, 200);
+    assert.equal(calls, 9);
+    assert.equal(json.mock.callCount(), failure === 'json' ? 1 : 0);
+    assert.deepEqual(response.json().probes[7], { id: 'callback-flow-mimic', responded: true, http: 401, threw: null });
+    assert.doesNotMatch(response.body + readLogs(), /synthetic-private|SyntaxError|TypeError/);
+  });
+}
+
+for (const kind of ['builtin', 'custom', 'string', 'null']) {
+  test(`T11 diag-fetch: mimic probes report only safe constructor names for ${kind} failures`, async t => {
+    const CustomError = class extends Error {};
+    Object.defineProperty(CustomError, 'name', { value: 'synthetic-private-constructor' });
+    const error = kind === 'builtin' ? new TypeError() : kind === 'custom' ? new CustomError() : kind === 'string' ? 'synthetic-private-error' : null;
+    if (error instanceof Error) {
+      Object.defineProperties(error, {
+        name: { get() { assert.fail('must not read error name'); } },
+        message: { get() { assert.fail('must not read error message'); } },
+        stack: { get() { assert.fail('must not read error stack'); } },
+      });
+    }
+    let calls = 0;
+    const { app, readLogs } = fixture(async () => {
+      const index = calls++;
+      if (index === 6 || index === 8) throw error;
+      return new Response('{}', { status: 400 });
+    });
+    t.after(() => app.close());
+    const response = await app.inject('/api/tiktok/diag-fetch');
+    assert.equal(response.statusCode, 200);
+    assert.equal(calls, 9);
+    const threw = kind === 'builtin' ? 'TypeError' : kind === 'custom' ? 'Error' : 'UnknownError';
+    assert.deepEqual(response.json().probes.slice(6), ['control-mimic', 'callback-flow-mimic'].map(id => ({ id, responded: false, http: null, threw })));
+    assert.doesNotMatch(response.body + readLogs(), /synthetic-private|message|stack/);
+  });
+}
