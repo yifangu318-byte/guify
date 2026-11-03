@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
+import { Writable } from 'node:stream';
+import { buildApp } from '../src/app.js';
+import { loadConfig } from '../src/config.js';
 import { fetchAuthorizedShops, handleTikTokCallback, readDecryptedShopToken, selectAuthorizedShop } from '../src/tiktok/callback.js';
 import { issueState } from '../src/tiktok/crypto.js';
 import { getEncryptedShopToken, type D1Binding, type D1Prepared } from '../src/tiktok/d1.js';
@@ -88,6 +91,67 @@ function callbackDeps(db: MockD1, capture: { url?: string; headers?: Record<stri
 }
 
 const MY_SHOP = { id: 'synthetic-shop-my', cipher: 'synthetic-cipher-my', code: 'synthetic-local-my', name: 'synthetic my shop', region: 'MY', seller_type: 'CROSS_BORDER' };
+
+test('T11 callback: omitted fetchImpl uses request-time global fetch for exchange and shops', async t => {
+  const db = new MockD1();
+  const capture: { url?: string; headers?: Record<string, string>; tokenUrl?: string } = {};
+  const { fetchImpl, ...deps } = callbackDeps(db, capture, { code: 0, data: { shops: [MY_SHOP] } });
+  const globalFetch = t.mock.method(globalThis, 'fetch', fetchImpl);
+  const outcome = await handleTikTokCallback(
+    { code: 'synthetic-code-cipher', state: stateFor('test-nonce-global-fetch', 'MY') },
+    deps,
+  );
+  assert.equal(outcome.status, 200);
+  assert.equal(globalFetch.mock.callCount(), 2);
+  assert.ok(capture.tokenUrl);
+  assert.ok(capture.url);
+  assert.deepEqual(outcome.body, { error: false, shop_code: MY_SHOP.id, market: 'MY', expires_at: EXPIRE_SEC * 1000 });
+  assert.equal(db.store.size, 1);
+  assert.equal((await getEncryptedShopToken(db, MY_SHOP.id))?.shopCipher, MY_SHOP.cipher);
+});
+
+test('T11 callback: no exchange and no global fetch retains transport-unavailable 503', async t => {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'fetch')!;
+  t.after(() => Object.defineProperty(globalThis, 'fetch', descriptor));
+  Object.defineProperty(globalThis, 'fetch', { ...descriptor, value: undefined });
+  const db = new MockD1();
+  const { fetchImpl: _unusedFetch, ...deps } = callbackDeps(db, {}, { code: 0, data: { shops: [MY_SHOP] } });
+  const outcome = await handleTikTokCallback(
+    { code: 'synthetic-code-cipher', state: stateFor('test-nonce-no-global-fetch', 'MY') },
+    deps,
+  );
+  assert.equal(outcome.status, 503);
+  assert.equal(outcome.body.code, 'TOKEN_EXCHANGE_UNAVAILABLE');
+  assert.equal(outcome.logEvent, 'exchange_failed');
+  assert.equal(db.store.size, 0);
+});
+
+test('T11 callback route: ignores captured runtime fetch and resolves global fetch after app creation', async t => {
+  const db = new MockD1();
+  let capturedCalls = 0;
+  const app = buildApp(loadConfig({}), new Writable({ write(_chunk, _encoding, done) { done(); } }), {}, {}, {
+    tiktok: {
+      getSecret: () => TEST_SECRET,
+      getAppKey: () => 'synthetic-app-key',
+      getAppSecret: () => 'synthetic-app-secret',
+      getRelayUrl: () => undefined,
+      getRelaySecret: () => undefined,
+      getDb: () => db,
+      now: () => NOW,
+      fetchImpl: async () => { capturedCalls++; throw new TypeError('synthetic captured transport failure'); },
+    },
+  });
+  t.after(() => app.close());
+  const capture: { url?: string; headers?: Record<string, string>; tokenUrl?: string } = {};
+  const globalFetch = t.mock.method(globalThis, 'fetch', routingFetch({ code: 0, data: { shops: [MY_SHOP] } }, capture));
+  const query = new URLSearchParams({ code: 'synthetic-code-cipher', state: stateFor('test-nonce-route-global-fetch', 'MY') });
+  const response = await app.inject(`/api/tiktok/callback?${query}`);
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.json().shop_code, MY_SHOP.id);
+  assert.equal(globalFetch.mock.callCount(), 2);
+  assert.equal(capturedCalls, 0);
+  assert.equal(db.store.size, 1);
+});
 
 test('T11 authorized shops: token shop missing + single MY shop -> success, cipher saved', async () => {
   const db = new MockD1();

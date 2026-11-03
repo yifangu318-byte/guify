@@ -460,7 +460,8 @@ export async function handleTikTokCallback(
   if (!db) {
     return { status: 503, body: { error: true, message: 'D1 database is not bound; token cannot be stored safely.', code: 'DATABASE_UNAVAILABLE' }, logEvent: 'database_unavailable' };
   }
-  const exchange = deps.exchange ?? (deps.fetchImpl ? createDefaultExchange(deps.fetchImpl) : undefined);
+  const fetchImpl = deps.fetchImpl ?? (typeof globalThis.fetch === 'function' ? globalThis.fetch : undefined);
+  const exchange = deps.exchange ?? (fetchImpl ? createDefaultExchange(fetchImpl) : undefined);
   if (!exchange) {
     return { status: 503, body: { error: true, message: 'Token exchange transport is not available.', code: 'TOKEN_EXCHANGE_UNAVAILABLE' }, logEvent: 'exchange_failed' };
   }
@@ -481,8 +482,8 @@ export async function handleTikTokCallback(
   if (!shopCode) {
     // Token response carried no shopId: resolve it via authorized shops.
     // No fetch transport means no safe resolution — keep the legacy
-    // shop_missing diagnostic (production always passes fetch via entry.js).
-    if (!deps.fetchImpl) {
+    // shop_missing diagnostic.
+    if (!fetchImpl) {
       return { status: 502, body: { error: true, message: 'Token exchange failed', code: 'UPSTREAM_ERROR', upstream_http: null, upstream_code: 'shop_missing' }, logEvent: 'exchange_failed' };
     }
     let shops: AuthorizedShop[];
@@ -494,7 +495,7 @@ export async function handleTikTokCallback(
         relayUrl: deps.relayUrl,
         relaySecret: deps.relaySecret,
         nowMs,
-        fetchImpl: deps.fetchImpl,
+        fetchImpl,
       });
     } catch (error) {
       if (error instanceof AuthorizedShopsError) {

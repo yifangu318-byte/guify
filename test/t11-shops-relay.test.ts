@@ -151,7 +151,7 @@ test('T11 relay: forwarded malformed JSON preserves shops_fetch_failed', async (
 });
 
 for (const mode of ['getters', 'env', 'undefined-getter'] as const) {
-  test(`T11 relay: callback route wires ${mode} with getter precedence and private logs`, async () => {
+  test(`T11 relay: callback route wires ${mode} with getter precedence and private logs`, async t => {
     const previous = { url: process.env.RELAY_URL, secret: process.env.RELAY_SECRET };
     process.env.RELAY_URL = 'https://synthetic-env-relay.invalid';
     process.env.RELAY_SECRET = 'synthetic-env-relay-secret';
@@ -180,6 +180,7 @@ for (const mode of ['getters', 'env', 'undefined-getter'] as const) {
       },
       ...(mode === 'env' ? {} : { getRelayUrl: () => mode === 'getters' ? RELAY_URL : undefined, getRelaySecret: () => RELAY_SECRET }),
     };
+    t.mock.method(globalThis, 'fetch', runtime.fetchImpl!);
     const app = buildApp(loadConfig({}), logs, {}, {}, { tiktok: runtime });
     try {
       const response = await app.inject({ method: 'GET', url: '/api/tiktok/callback', query: QUERY });

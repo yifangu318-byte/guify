@@ -103,7 +103,10 @@ test('T11 shop diagnostic: shops[0] numeric still succeeds', async () => {
   assert.equal(good.body.shop_code, '987654321');
 });
 
-test('T11 shop diagnostic: shop missing -> 502 shop_missing and no D1 write', async () => {
+test('T11 shop diagnostic: shop missing without fetch -> 502 shop_missing and no D1 write', async t => {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'fetch')!;
+  t.after(() => Object.defineProperty(globalThis, 'fetch', descriptor));
+  Object.defineProperty(globalThis, 'fetch', { ...descriptor, value: undefined });
   const db = new MockD1();
   const failed = await handleTikTokCallback({ code: 'synthetic-code-diag', state: stateFor('test-nonce-diag333') }, {
     secret: TEST_SECRET,
