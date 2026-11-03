@@ -75,11 +75,18 @@ export interface AuthorizedShop {
   region?: string;
 }
 
+interface ShopsControlDiagnostic {
+  control_responded: boolean;
+  control_http: number | null;
+  control_threw_name: string | null;
+}
+
 /**
  * Authorized-shops failure carrying only safe diagnostics: the upstream HTTP
  * status (or null on network failure), a diagnostic category, and the TikTok
  * error code when one was returned (or null), and a safe error constructor
- * name for a thrown fetch. Never carries a token, cipher, upstream message,
+ * name for a thrown fetch, plus control reachability fields only on that path.
+ * Never carries a token, cipher, upstream message,
  * stack, URL, or body.
  */
 export class AuthorizedShopsError extends Error {
@@ -87,13 +94,21 @@ export class AuthorizedShopsError extends Error {
   readonly diagnostic: 'shops_fetch_thrown' | 'shops_fetch_failed' | 'shops_empty' | 'shops_cipher_missing' | 'shops_no_match';
   readonly upstreamCode: number | string | null;
   readonly upstreamErrorName: string | null;
-  constructor(upstreamHttp: number | null, diagnostic: AuthorizedShopsError['diagnostic'], upstreamCode: number | string | null, upstreamErrorName: string | null = null) {
+  declare readonly control_responded?: boolean;
+  declare readonly control_http?: number | null;
+  declare readonly control_threw_name?: string | null;
+  constructor(upstreamHttp: number | null, diagnostic: AuthorizedShopsError['diagnostic'], upstreamCode: number | string | null, upstreamErrorName: string | null = null, control?: ShopsControlDiagnostic) {
     super('Authorized shops lookup failed');
     this.name = 'AuthorizedShopsError';
     this.upstreamHttp = upstreamHttp;
     this.diagnostic = diagnostic;
     this.upstreamCode = upstreamCode;
     this.upstreamErrorName = upstreamErrorName;
+    if (control) {
+      this.control_responded = control.control_responded;
+      this.control_http = control.control_http;
+      this.control_threw_name = control.control_threw_name;
+    }
   }
 }
 
@@ -130,17 +145,36 @@ export async function fetchAuthorizedShops(input: {
   const params = { app_key: input.appKey, timestamp: String(timestamp) };
   const sign = signDraft(path, params, input.appSecret, timestamp);
   const query = new URLSearchParams({ ...params, sign });
+  const headers = {
+    Accept: 'application/json',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  };
   let response: Response;
   try {
     response = await input.fetchImpl(`https://open-api.tiktokglobalshop.com${path}?${query}`, {
       headers: {
         'x-tts-access-token': input.accessToken,
-        Accept: 'application/json',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        ...headers,
       },
     });
   } catch (error) {
-    throw new AuthorizedShopsError(null, 'shops_fetch_thrown', null, shopsErrorName(error));
+    const upstreamErrorName = shopsErrorName(error);
+    let control: ShopsControlDiagnostic;
+    try {
+      // One credential-free reachability probe, only after the real fetch throws.
+      // Deliberately fake key/sign: never sign this request or read its body.
+      const controlQuery = new URLSearchParams({
+        app_key: 'synthetic-control-app-key',
+        timestamp: String(timestamp),
+        sign: 'synthetic-control-sign',
+      });
+      const controlResponse = await input.fetchImpl(`https://open-api.tiktokglobalshop.com${path}?${controlQuery}`, { headers });
+      control = { control_responded: true, control_http: controlResponse.status, control_threw_name: null };
+    } catch (controlError) {
+      control = { control_responded: false, control_http: null, control_threw_name: shopsErrorName(controlError) };
+    }
+    // The control result never replaces the original failure or error name.
+    throw new AuthorizedShopsError(null, 'shops_fetch_thrown', null, upstreamErrorName, control);
   }
   let payload: Record<string, unknown> | undefined;
   try {
@@ -409,6 +443,11 @@ export async function handleTikTokCallback(
             upstream_code: error.diagnostic,
             ...(error.upstreamCode !== null ? { upstream_tiktok_code: error.upstreamCode } : {}),
             ...(error.upstreamErrorName !== null ? { upstream_error_name: error.upstreamErrorName } : {}),
+            ...(error.diagnostic === 'shops_fetch_thrown' ? {
+              control_responded: error.control_responded,
+              control_http: error.control_http,
+              control_threw_name: error.control_threw_name,
+            } : {}),
           },
           logEvent: 'exchange_failed',
         };

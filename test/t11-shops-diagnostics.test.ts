@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { handleTikTokCallback } from '../src/tiktok/callback.js';
+import { AuthorizedShopsError, fetchAuthorizedShops, handleTikTokCallback } from '../src/tiktok/callback.js';
 import { issueState } from '../src/tiktok/crypto.js';
 import type { D1Binding, D1Prepared } from '../src/tiktok/d1.js';
 
@@ -74,13 +74,88 @@ test('T11 shops diagnostics: standard client headers preserve token header and f
   assertFailure(result, 'shops_empty', 200);
 });
 
-test('T11 shops diagnostics: fetch TypeError has only its constructor name and no private text', async () => {
+test('T11 shops diagnostics: real and control throws retain only safe constructor names', async () => {
   const error = new TypeError(PRIVATE_TEXT);
   error.name = PRIVATE_TEXT;
   error.stack = PRIVATE_TEXT;
-  const result = await callback(async () => { throw error; });
-  assertFailure(result, 'shops_fetch_thrown', null, { upstream_error_name: 'TypeError' });
+  const controlError = new RangeError(PRIVATE_TEXT);
+  controlError.name = PRIVATE_TEXT;
+  controlError.stack = PRIVATE_TEXT;
+  let requests = 0;
+  const result = await callback(async () => { throw ++requests === 1 ? error : controlError; });
+  assert.equal(requests, 2);
+  assertFailure(result, 'shops_fetch_thrown', null, {
+    upstream_error_name: 'TypeError', control_responded: false, control_http: null, control_threw_name: 'RangeError',
+  });
 });
+
+for (const status of [400, 200]) {
+  test(`T11 shops diagnostics: control HTTP ${status} preserves original failure without reading its JSON error body`, async () => {
+    const requests: Array<{ url: URL; headers: Headers }> = [];
+    const controlResponse = Response.json({ code: 40001, message: PRIVATE_TEXT }, { status });
+    const result = await callback(async (url, init) => {
+      requests.push({ url: new URL(String(url)), headers: new Headers(init?.headers) });
+      if (requests.length === 1) throw new TypeError(PRIVATE_TEXT);
+      return controlResponse;
+    });
+    assert.equal(requests.length, 2);
+    const [real, control] = requests;
+    assert.ok(real && control);
+    assert.equal(control.url.origin, 'https://open-api.tiktokglobalshop.com');
+    assert.equal(control.url.pathname, '/authorization/202309/shops');
+    assert.equal(control.url.origin, real.url.origin);
+    assert.equal(control.url.pathname, real.url.pathname);
+    assert.deepEqual([...control.url.searchParams.keys()].sort(), ['app_key', 'sign', 'timestamp']);
+    assert.equal(control.url.searchParams.get('app_key'), 'synthetic-control-app-key');
+    assert.equal(control.url.searchParams.get('sign'), 'synthetic-control-sign');
+    assert.equal(control.url.searchParams.get('timestamp'), String(Math.floor(NOW / 1000)));
+    assert.notEqual(control.url.searchParams.get('app_key'), real.url.searchParams.get('app_key'));
+    assert.notEqual(control.url.searchParams.get('sign'), real.url.searchParams.get('sign'));
+    assert.equal(real.headers.get('x-tts-access-token'), 'synthetic-diagnostics-access');
+    assert.equal(control.headers.has('x-tts-access-token'), false);
+    const expectedHeaders = new Headers(real.headers);
+    expectedHeaders.delete('x-tts-access-token');
+    assert.deepEqual([...control.headers], [...expectedHeaders]);
+    assert.deepEqual([...control.headers.keys()].sort(), ['accept', 'user-agent']);
+    assert.equal(controlResponse.bodyUsed, false);
+    assertFailure(result, 'shops_fetch_thrown', null, {
+      upstream_error_name: 'TypeError', control_responded: true, control_http: status, control_threw_name: null,
+    });
+  });
+}
+
+for (const responded of [true, false]) {
+  test(`T11 shops diagnostics: thrown error itself carries exactly three control fields (responded=${responded})`, async () => {
+    let requests = 0;
+    await assert.rejects(fetchAuthorizedShops({
+      accessToken: 'synthetic-diagnostics-access',
+      appKey: 'synthetic-diagnostics-app-key',
+      appSecret: 'synthetic-diagnostics-app-secret',
+      nowMs: NOW,
+      fetchImpl: async () => {
+        if (++requests === 1) throw new TypeError(PRIVATE_TEXT);
+        if (!responded) throw { name: PRIVATE_TEXT, message: PRIVATE_TEXT };
+        return Response.json({ code: 40001, message: PRIVATE_TEXT }, { status: 400 });
+      },
+    }), error => {
+      assert.ok(error instanceof AuthorizedShopsError);
+      assert.equal(error.diagnostic, 'shops_fetch_thrown');
+      assert.equal(error.upstreamHttp, null);
+      assert.equal(error.upstreamCode, null);
+      assert.equal(error.upstreamErrorName, 'TypeError');
+      assert.equal(error.control_responded, responded);
+      assert.equal(error.control_http, responded ? 400 : null);
+      assert.equal(error.control_threw_name, responded ? null : 'UnknownError');
+      assert.deepEqual(Object.keys(error).sort(), [
+        'control_http', 'control_responded', 'control_threw_name', 'diagnostic', 'name',
+        'upstreamCode', 'upstreamErrorName', 'upstreamHttp',
+      ]);
+      assert.doesNotMatch(JSON.stringify(error), /synthetic|https?:|app_key|sign=|token=|cipher=|stack/i);
+      return true;
+    });
+    assert.equal(requests, 2);
+  });
+}
 
 test('T11 shops diagnostics: internal plain Error outside handled response branches is distinct', async () => {
   const error = new Error(PRIVATE_TEXT);
@@ -101,14 +176,18 @@ test('T11 shops diagnostics: invalid null response is an internal TypeError', as
 
 test('T11 shops diagnostics: non-Error fetch throw uses a fixed safe fallback', async () => {
   const result = await callback(async () => { throw PRIVATE_TEXT; });
-  assertFailure(result, 'shops_fetch_thrown', null, { upstream_error_name: 'UnknownError' });
+  assertFailure(result, 'shops_fetch_thrown', null, {
+    upstream_error_name: 'UnknownError', control_responded: false, control_http: null, control_threw_name: 'UnknownError',
+  });
 });
 
 test('T11 shops diagnostics: custom Error name cannot become response text', async () => {
   const CustomError = class extends Error {};
   Object.defineProperty(CustomError, 'name', { value: PRIVATE_TEXT });
   const result = await callback(async () => { throw new CustomError(PRIVATE_TEXT); });
-  assertFailure(result, 'shops_fetch_thrown', null, { upstream_error_name: 'Error' });
+  assertFailure(result, 'shops_fetch_thrown', null, {
+    upstream_error_name: 'Error', control_responded: false, control_http: null, control_threw_name: 'Error',
+  });
 });
 
 test('T11 shops diagnostics: JSON parse failure keeps HTTP status and legacy category', async () => {
@@ -152,7 +231,12 @@ test('T11 shops diagnostics: multiple shops without market match keeps shops_no_
 });
 
 test('T11 shops diagnostics: single MY shop preserves success body and saves selected shop', async () => {
-  const result = await callback(responseFetch({ code: 0, data: { shops: [MY_SHOP] } }));
+  let requests = 0;
+  const result = await callback(async () => {
+    requests++;
+    return Response.json({ code: 0, data: { shops: [MY_SHOP] } });
+  });
+  assert.equal(requests, 1);
   assert.deepEqual(result.outcome, {
     status: 200,
     body: { error: false, shop_code: MY_SHOP.id, market: 'MY', expires_at: EXPIRES_AT },
