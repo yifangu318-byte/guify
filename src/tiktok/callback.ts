@@ -1,8 +1,10 @@
 import { decryptToken, encryptToken, verifyState } from './crypto.js';
 import { ensureShopTokenSchema, getEncryptedShopToken, saveEncryptedShopToken, type D1Binding } from './d1.js';
-// NOTE: this file must NOT import signDraft. The token/get endpoint (see step 6)
-// takes app_secret as a plain query param and no signature; business-API signing
-// in signing.ts is untouched and still used by client.ts.
+import { signDraft } from './signing.js';
+// NOTE: the token/get endpoint (see step 6) takes app_secret as a plain query
+// param and no signature, so it must NOT use signDraft. The authorized-shops
+// fallback (see step 6b) IS a signed business API and uses signDraft; the
+// business-API signing in signing.ts is untouched and still used by client.ts.
 
 /**
  * T10 回调 /api/tiktok/callback 的真实接入逻辑（简体中文注释）。
@@ -22,10 +24,25 @@ import { ensureShopTokenSchema, getEncryptedShopToken, saveEncryptedShopToken, t
  *    形态：access_token_expire_in 时间戳（秒或毫秒）优先，expires_in 秒数作回退；
  *    店铺号优先取 data.shops[0].shop_id（v1 单店流程，多店选择留待第四步），回退
  *    data.shop_id / data.shopId（字符串或安全整数，数字形式转字符串；只认同名字段，
- *    绝不拿 seller_id、open_id 或本地店铺码冒充店铺号）；shop_cipher 本次不存（无 D1 结构变更，留待第四步
- *    单独的迁移审批）。失败时只返回上游 HTTP 状态与 TikTok 错误码类别，绝不回显
- *    上游原始报文、授权码、state、Token 或密钥；
- * 7. 成功后：加密落 D1，响应只返回 shop_code / market / expires_at，绝不返回任何 Token。
+ *    绝不拿 seller_id、open_id 或本地店铺码冒充店铺号）。换 Token 返回里经常根本
+ *    没有店铺号（2026-11-03 实测 shop_missing 即属此情形），此时不丢弃 Token，
+ *    改走 6b 授权店铺接口补齐店铺号与 shop_cipher；
+ * 6b. 授权店铺补齐（T11，2026-11-03）：仅当换 Token 未返回店铺号时调用一次
+ *    GET open-api.tiktokglobalshop.com/authorization/202309/shops，查询参数只有
+ *    app_key / timestamp（秒）/ sign（signDraft：secret + path + 有序参数 +
+ *    secret 的 HMAC-SHA256，与现有业务签名草案一致），请求头
+ *    x-tts-access-token 为刚换到的新 Token；不带 shop_cipher、不带 version
+ *    查询参数（version 只在路径里）、不带 shop_id 查询参数。响应 code 为 0 才
+ *    算成功；data.shops[] 每家店的 id 即店铺号、cipher 即 shop_cipher、code
+ *    是本地码（绝不能当店铺号）、region 是市场。选店规则：state 带市场且非
+ *    unknown 时优先选 region 等于该市场的店；单店时直接用它；多店且无市场匹
+ *    配时失败（绝不随便挑第一家）。shop_cipher 与店铺号、市场一样存明文
+ *    TEXT（它本身不是 Token，Token 仍加密存），但绝不出现在任何响应与日志里。
+ *    此步失败时只返回上游类别诊断（shops_fetch_failed / shops_empty /
+ *    shops_cipher_missing / shops_no_match），绝不回显上游报文、Token 或 cipher；
+ *    补齐失败则不落库，Token 作废、下次重新授权；
+ * 7. 成功后：加密落 D1（含 shop_cipher），响应只返回 shop_code / market /
+ *    expires_at，绝不返回任何 Token 或 cipher。
  *
  * 401 只刷新一次的口径属于 T2 只读适配器的读请求重试（已有测试覆盖），不适用于
  * 首次 code 换 Token（此时尚无可刷新的旧 Token），换 Token 的 401 直接记为上游失败。
@@ -41,7 +58,125 @@ export interface TokenExchangeResult {
   /** Absolute expiry in Unix milliseconds, preferred when the upstream returns a timestamp. */
   expiresAtMs?: number;
   shopId?: string;
+  /** Only set by the authorized-shops fallback; token-response path leaves it unset (Step 4 backfill). */
+  shopCipher?: string;
   scope: string;
+}
+
+/**
+ * One authorized shop, as returned by GET /authorization/202309/shops.
+ * id = shop_id, cipher = shop_cipher, code = local shop code (NEVER shop_id).
+ * cipher may be absent in malformed entries; the caller rejects those.
+ */
+export interface AuthorizedShop {
+  id: string;
+  cipher?: string;
+  region?: string;
+}
+
+/**
+ * Authorized-shops failure carrying only safe diagnostics: the upstream HTTP
+ * status (or null on network failure), a diagnostic category, and the TikTok
+ * error code when one was returned (or null). Never carries a token, cipher,
+ * message, or body.
+ */
+export class AuthorizedShopsError extends Error {
+  readonly upstreamHttp: number | null;
+  readonly diagnostic: 'shops_fetch_failed' | 'shops_empty' | 'shops_cipher_missing' | 'shops_no_match';
+  readonly upstreamCode: number | string | null;
+  constructor(upstreamHttp: number | null, diagnostic: AuthorizedShopsError['diagnostic'], upstreamCode: number | string | null) {
+    super('Authorized shops lookup failed');
+    this.name = 'AuthorizedShopsError';
+    this.upstreamHttp = upstreamHttp;
+    this.diagnostic = diagnostic;
+    this.upstreamCode = upstreamCode;
+  }
+}
+
+function authorizedShopId(value: unknown): string | undefined {
+  if (typeof value === 'string' && value) return value;
+  if (typeof value === 'number' && Number.isSafeInteger(value)) return String(value);
+  return undefined;
+}
+
+/**
+ * Fetch authorized shops with the freshly exchanged access token. Only used
+ * when the token response carried no shopId. Query keys are exactly
+ * app_key/timestamp/sign; the access token travels only in the
+ * x-tts-access-token header. Never logs or returns tokens or ciphers.
+ */
+export async function fetchAuthorizedShops(input: {
+  accessToken: string;
+  appKey: string;
+  appSecret: string;
+  nowMs: number;
+  fetchImpl: typeof fetch;
+}): Promise<AuthorizedShop[]> {
+  const timestamp = Math.floor(input.nowMs / 1000);
+  const path = '/authorization/202309/shops';
+  const params = { app_key: input.appKey, timestamp: String(timestamp) };
+  const sign = signDraft(path, params, input.appSecret, timestamp);
+  const query = new URLSearchParams({ ...params, sign });
+  let response: Response;
+  try {
+    response = await input.fetchImpl(`https://open-api.tiktokglobalshop.com${path}?${query}`, {
+      headers: { 'x-tts-access-token': input.accessToken },
+    });
+  } catch {
+    throw new AuthorizedShopsError(null, 'shops_fetch_failed', null);
+  }
+  let payload: Record<string, unknown> | undefined;
+  try {
+    payload = (await response.json()) as Record<string, unknown>;
+  } catch {
+    throw new AuthorizedShopsError(response.status, 'shops_fetch_failed', null);
+  }
+  if (!payload || typeof payload !== 'object') {
+    throw new AuthorizedShopsError(response.status, 'shops_fetch_failed', null);
+  }
+  // TikTok envelope: code 0 (number or string "0") = success; any other code = failure.
+  // The upstream message/body is deliberately NOT carried forward.
+  if ('code' in payload) {
+    const upstreamCode = payload.code;
+    const isSuccess = upstreamCode === 0 || upstreamCode === '0';
+    if (!isSuccess) {
+      throw new AuthorizedShopsError(response.status, 'shops_fetch_failed', sanitizeUpstreamCode(upstreamCode));
+    }
+  }
+  if (!response.ok) {
+    throw new AuthorizedShopsError(response.status, 'shops_fetch_failed', sanitizeUpstreamCode(payload.code ?? null));
+  }
+  const data = (payload.data && typeof payload.data === 'object' ? payload.data : payload) as Record<string, unknown>;
+  const shops = data.shops;
+  if (!Array.isArray(shops) || shops.length === 0) {
+    throw new AuthorizedShopsError(response.status, 'shops_empty', null);
+  }
+  const parsed: AuthorizedShop[] = [];
+  for (const entry of shops) {
+    if (!entry || typeof entry !== 'object') continue;
+    const record = entry as Record<string, unknown>;
+    const id = authorizedShopId(record.id);
+    if (!id) continue;
+    const cipher = typeof record.cipher === 'string' && record.cipher ? record.cipher : undefined;
+    const region = typeof record.region === 'string' && record.region ? record.region : undefined;
+    parsed.push({ id, ...(cipher ? { cipher } : {}), ...(region ? { region } : {}) });
+  }
+  if (parsed.length === 0) {
+    throw new AuthorizedShopsError(response.status, 'shops_empty', null);
+  }
+  return parsed;
+}
+
+/** Select one shop: region match first, single shop as fallback, else no match. Never arbitrary. */
+export function selectAuthorizedShop(shops: AuthorizedShop[], market: string | undefined): AuthorizedShop | undefined {
+  if (market && market !== 'unknown') {
+    const matched = shops.find(shop => shop.region === market);
+    if (matched) return matched;
+    if (shops.length === 1) return shops[0];
+    return undefined;
+  }
+  if (shops.length === 1) return shops[0];
+  return undefined;
 }
 
 /**
@@ -225,12 +360,53 @@ export async function handleTikTokCallback(
   if (verified.shopCode && exchanged.shopId && verified.shopCode !== exchanged.shopId) {
     return { status: 400, body: { error: true, message: 'Shop mismatch between state and token', code: 'SHOP_MISMATCH' }, logEvent: 'shop_mismatch' };
   }
-  const shopCode = verified.shopCode ?? exchanged.shopId;
-  if (!shopCode) {
-    return { status: 502, body: { error: true, message: 'Token exchange failed', code: 'UPSTREAM_ERROR', upstream_http: null, upstream_code: 'shop_missing' }, logEvent: 'exchange_failed' };
-  }
   // market 未提供时明写 unknown，绝不凭空猜测为某个国家市场。
   const market = verified.market ?? 'unknown';
+  let shopCode = verified.shopCode ?? exchanged.shopId;
+  let shopCipher = exchanged.shopCipher ?? '';
+  if (!shopCode) {
+    // Token response carried no shopId: resolve it via authorized shops.
+    // No fetch transport means no safe resolution — keep the legacy
+    // shop_missing diagnostic (production always passes fetch via entry.js).
+    if (!deps.fetchImpl) {
+      return { status: 502, body: { error: true, message: 'Token exchange failed', code: 'UPSTREAM_ERROR', upstream_http: null, upstream_code: 'shop_missing' }, logEvent: 'exchange_failed' };
+    }
+    let shops: AuthorizedShop[];
+    try {
+      shops = await fetchAuthorizedShops({
+        accessToken: exchanged.accessToken,
+        appKey,
+        appSecret,
+        nowMs,
+        fetchImpl: deps.fetchImpl,
+      });
+    } catch (error) {
+      if (error instanceof AuthorizedShopsError) {
+        return {
+          status: 502,
+          body: {
+            error: true,
+            message: 'Authorized shops lookup failed',
+            code: 'UPSTREAM_ERROR',
+            upstream_http: error.upstreamHttp,
+            upstream_code: error.diagnostic,
+            ...(error.upstreamCode !== null ? { upstream_tiktok_code: error.upstreamCode } : {}),
+          },
+          logEvent: 'exchange_failed',
+        };
+      }
+      return { status: 502, body: { error: true, message: 'Authorized shops lookup failed', code: 'UPSTREAM_ERROR', upstream_http: null, upstream_code: 'shops_fetch_failed' }, logEvent: 'exchange_failed' };
+    }
+    const selected = selectAuthorizedShop(shops, verified.market);
+    if (!selected) {
+      return { status: 502, body: { error: true, message: 'Authorized shops lookup failed', code: 'UPSTREAM_ERROR', upstream_http: null, upstream_code: 'shops_no_match' }, logEvent: 'exchange_failed' };
+    }
+    if (!selected.cipher) {
+      return { status: 502, body: { error: true, message: 'Authorized shops lookup failed', code: 'UPSTREAM_ERROR', upstream_http: null, upstream_code: 'shops_cipher_missing' }, logEvent: 'exchange_failed' };
+    }
+    shopCode = selected.id;
+    shopCipher = selected.cipher;
+  }
   const expiresAt = typeof exchanged.expiresAtMs === 'number' && Number.isSafeInteger(exchanged.expiresAtMs)
     ? exchanged.expiresAtMs
     : typeof exchanged.expiresInSec === 'number' && Number.isSafeInteger(exchanged.expiresInSec) && exchanged.expiresInSec > 0
@@ -248,6 +424,7 @@ export async function handleTikTokCallback(
       refreshTokenEnc: encryptToken(secret, exchanged.refreshToken),
       expiresAt,
       scope: exchanged.scope,
+      shopCipher,
     }, nowMs);
   } catch {
     return { status: 503, body: { error: true, message: 'D1 database is not available; token cannot be stored safely.', code: 'DATABASE_UNAVAILABLE' }, logEvent: 'database_unavailable' };
@@ -256,7 +433,7 @@ export async function handleTikTokCallback(
 }
 
 /** 供适配层读取 D1 密文并解密（仅在持有密钥时调用，失败只报通用错误）。 */
-export async function readDecryptedShopToken(db: D1Binding, secret: string, shopCode: string): Promise<{ shopCode: string; market: string; accessToken: string; refreshToken: string; expiresAt: number; scope: string } | undefined> {
+export async function readDecryptedShopToken(db: D1Binding, secret: string, shopCode: string): Promise<{ shopCode: string; market: string; accessToken: string; refreshToken: string; expiresAt: number; scope: string; shopCipher: string } | undefined> {
   const record = await getEncryptedShopToken(db, shopCode);
   if (!record) return undefined;
   return {
@@ -266,5 +443,6 @@ export async function readDecryptedShopToken(db: D1Binding, secret: string, shop
     refreshToken: decryptToken(secret, record.refreshTokenEnc),
     expiresAt: record.expiresAt,
     scope: record.scope,
+    shopCipher: record.shopCipher,
   };
 }

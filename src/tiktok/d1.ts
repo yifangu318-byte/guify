@@ -31,6 +31,18 @@ export const SHOP_TOKENS_SCHEMA_SQL = [
   '  refresh_token_enc TEXT NOT NULL,',
   '  expires_at INTEGER NOT NULL,',
   '  scope TEXT NOT NULL DEFAULT \'\',',
+  // shop_cipher (T11): the per-shop cipher returned by the authorized-shops
+  // API (field "cipher" there). It is NOT a token: it is stored as plaintext
+  // TEXT like shop_code/market, while access/refresh tokens stay AES-256-GCM
+  // encrypted. NOTE: production's table was created by the Console migration
+  // (0001), so CREATE TABLE IF NOT EXISTS alone will NOT add this column to
+  // an existing production table — migrations/d1/0002_shop_cipher.sql (ALTER
+  // TABLE) must be run manually in the D1 Console before a fresh authorize,
+  // otherwise the INSERT below fails closed with DATABASE_UNAVAILABLE.
+  // Column order here (cipher after scope) differs from the migrated table
+  // (ALTER appends cipher last); all SQL below uses explicit column lists,
+  // so the order difference is irrelevant.
+  '  shop_cipher TEXT NOT NULL DEFAULT \'\',',
   '  created_at INTEGER NOT NULL,',
   '  updated_at INTEGER NOT NULL',
   ');',
@@ -44,9 +56,13 @@ export interface EncryptedShopToken {
   refreshTokenEnc: string;
   expiresAt: number;
   scope: string;
+  shopCipher: string;
   createdAt: number;
   updatedAt: number;
 }
+
+/** Save input: shopCipher defaults to '' (token-response path, backfilled in Step 4). */
+export type EncryptedShopTokenInput = Omit<EncryptedShopToken, 'createdAt' | 'updatedAt' | 'shopCipher'> & { shopCipher?: string };
 
 export async function ensureShopTokenSchema(db: D1Binding): Promise<void> {
   // D1 的 prepare().run() 可执行 DDL；本地模拟实现同样遵循该约定。
@@ -55,23 +71,24 @@ export async function ensureShopTokenSchema(db: D1Binding): Promise<void> {
 
 export async function saveEncryptedShopToken(
   db: D1Binding,
-  record: Omit<EncryptedShopToken, 'createdAt' | 'updatedAt'>,
+  record: EncryptedShopTokenInput,
   nowMs: number,
 ): Promise<void> {
   if (!record.shopCode.trim() || !record.market.trim() || !record.accessTokenEnc || !record.refreshTokenEnc || !Number.isSafeInteger(record.expiresAt)) {
     throw new Error('Invalid encrypted shop token record');
   }
+  const shopCipher = record.shopCipher ?? '';
   await db.prepare(
-    'INSERT INTO shop_tokens (shop_code, market, access_token_enc, refresh_token_enc, expires_at, scope, created_at, updated_at) ' +
-    'VALUES (?, ?, ?, ?, ?, ?, ?, ?) ' +
+    'INSERT INTO shop_tokens (shop_code, market, access_token_enc, refresh_token_enc, expires_at, scope, shop_cipher, created_at, updated_at) ' +
+    'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
     'ON CONFLICT(shop_code) DO UPDATE SET market = excluded.market, access_token_enc = excluded.access_token_enc, ' +
-    'refresh_token_enc = excluded.refresh_token_enc, expires_at = excluded.expires_at, scope = excluded.scope, updated_at = excluded.updated_at',
-  ).bind(record.shopCode, record.market, record.accessTokenEnc, record.refreshTokenEnc, record.expiresAt, record.scope, nowMs, nowMs).run();
+    'refresh_token_enc = excluded.refresh_token_enc, expires_at = excluded.expires_at, scope = excluded.scope, shop_cipher = excluded.shop_cipher, updated_at = excluded.updated_at',
+  ).bind(record.shopCode, record.market, record.accessTokenEnc, record.refreshTokenEnc, record.expiresAt, record.scope, shopCipher, nowMs, nowMs).run();
 }
 
 export async function getEncryptedShopToken(db: D1Binding, shopCode: string): Promise<EncryptedShopToken | undefined> {
   const row = await db.prepare(
-    'SELECT shop_code, market, access_token_enc, refresh_token_enc, expires_at, scope, created_at, updated_at FROM shop_tokens WHERE shop_code = ?',
+    'SELECT shop_code, market, access_token_enc, refresh_token_enc, expires_at, scope, shop_cipher, created_at, updated_at FROM shop_tokens WHERE shop_code = ?',
   ).bind(shopCode).first<Record<string, unknown>>();
   if (!row) return undefined;
   return {
@@ -81,6 +98,7 @@ export async function getEncryptedShopToken(db: D1Binding, shopCode: string): Pr
     refreshTokenEnc: String(row.refresh_token_enc),
     expiresAt: Number(row.expires_at),
     scope: String(row.scope ?? ''),
+    shopCipher: String(row.shop_cipher ?? ''),
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
   };
