@@ -59,6 +59,21 @@ function assertFailure(result: Awaited<ReturnType<typeof callback>>, diagnostic:
   assert.doesNotMatch(JSON.stringify(result.outcome.body), /synthetic|https?:|app_key|sign=|token=|cipher=|stack/i);
 }
 
+test('T11 shops diagnostics: standard client headers preserve token header and fail-closed empty shops', async () => {
+  const requests: Array<{ init: RequestInit | undefined }> = [];
+  const result = await callback(async (_url, init) => {
+    requests.push({ init });
+    return Response.json({ code: 0, data: { shops: [] } });
+  });
+  assert.equal(requests.length, 1);
+  const headers = new Headers(requests[0]?.init?.headers);
+  assert.equal(headers.get('Accept'), 'application/json');
+  assert.equal(headers.get('User-Agent'), 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36');
+  assert.equal(headers.get('x-tts-access-token'), 'synthetic-diagnostics-access');
+  assert.deepEqual([...headers.keys()].sort(), ['accept', 'user-agent', 'x-tts-access-token']);
+  assertFailure(result, 'shops_empty', 200);
+});
+
 test('T11 shops diagnostics: fetch TypeError has only its constructor name and no private text', async () => {
   const error = new TypeError(PRIVATE_TEXT);
   error.name = PRIVATE_TEXT;
