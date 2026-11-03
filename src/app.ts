@@ -94,7 +94,6 @@ export function buildApp(config: Config, destination?: NodeJS.WritableStream, ga
       relayUrl: tiktok?.getRelayUrl ? tiktok.getRelayUrl() : process.env.RELAY_URL,
       relaySecret: tiktok?.getRelaySecret ? tiktok.getRelaySecret() : process.env.RELAY_SECRET,
       db: tiktok?.getDb ? tiktok.getDb() : undefined,
-      ...(tiktok?.fetchImpl ? { fetchImpl: tiktok.fetchImpl } : {}),
       ...(tiktok?.now ? { now: tiktok.now } : {}),
     });
     app.log.info({ event: 'tiktok_callback', outcome: outcome.logEvent, status: outcome.status }, 'TikTok callback handled');
