@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { AuthorizedShopsError, fetchAuthorizedShops, handleTikTokCallback } from '../src/tiktok/callback.js';
 import { issueState } from '../src/tiktok/crypto.js';
@@ -10,6 +10,12 @@ const NOW = 1_790_000_000_000;
 const EXPIRES_AT = NOW + 7_200_000;
 const MY_SHOP = { id: 'synthetic-diagnostics-shop-my', region: 'MY', cipher: 'synthetic-diagnostics-cipher' };
 const PRIVATE_TEXT = 'synthetic-private-message https://synthetic.invalid/shops?app_key=synthetic-key&sign=synthetic-sign token=synthetic-access cipher=synthetic-cipher';
+
+function stubGlobalFetch(t: TestContext, implementation: typeof fetch = async () => { throw new URIError(PRIVATE_TEXT); }) {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = implementation;
+  t.after(() => { globalThis.fetch = originalFetch; });
+}
 
 async function callback(fetchImpl: typeof fetch) {
   const prepared: string[] = [];
@@ -74,7 +80,8 @@ test('T11 shops diagnostics: standard client headers preserve token header and f
   assertFailure(result, 'shops_empty', 200);
 });
 
-test('T11 shops diagnostics: real and control throws retain only safe constructor names', async () => {
+test('T11 shops diagnostics: real and control throws retain only safe constructor names', async t => {
+  stubGlobalFetch(t);
   const error = new TypeError(PRIVATE_TEXT);
   error.name = PRIVATE_TEXT;
   error.stack = PRIVATE_TEXT;
@@ -83,14 +90,17 @@ test('T11 shops diagnostics: real and control throws retain only safe constructo
   controlError.stack = PRIVATE_TEXT;
   let requests = 0;
   const result = await callback(async () => { throw ++requests === 1 ? error : controlError; });
-  assert.equal(requests, 2);
+  assert.equal(requests, 3);
   assertFailure(result, 'shops_fetch_thrown', null, {
     upstream_error_name: 'TypeError', control_responded: false, control_http: null, control_threw_name: 'RangeError',
+    bisect_known_host: { responded: false, http: null, threw: 'RangeError' },
+    bisect_bare_fetch: { responded: false, http: null, threw: 'URIError' },
   });
 });
 
 for (const status of [400, 200]) {
-  test(`T11 shops diagnostics: control HTTP ${status} preserves original failure without reading its JSON error body`, async () => {
+  test(`T11 shops diagnostics: control HTTP ${status} preserves original failure without reading its JSON error body`, async t => {
+    stubGlobalFetch(t);
     const requests: Array<{ url: URL; headers: Headers }> = [];
     const controlResponse = Response.json({ code: 40001, message: PRIVATE_TEXT }, { status });
     const result = await callback(async (url, init) => {
@@ -98,7 +108,7 @@ for (const status of [400, 200]) {
       if (requests.length === 1) throw new TypeError(PRIVATE_TEXT);
       return controlResponse;
     });
-    assert.equal(requests.length, 2);
+    assert.equal(requests.length, 3);
     const [real, control] = requests;
     assert.ok(real && control);
     assert.equal(control.url.origin, 'https://open-api.tiktokglobalshop.com');
@@ -120,12 +130,15 @@ for (const status of [400, 200]) {
     assert.equal(controlResponse.bodyUsed, false);
     assertFailure(result, 'shops_fetch_thrown', null, {
       upstream_error_name: 'TypeError', control_responded: true, control_http: status, control_threw_name: null,
+      bisect_known_host: { responded: true, http: status, threw: null },
+      bisect_bare_fetch: { responded: false, http: null, threw: 'URIError' },
     });
   });
 }
 
 for (const responded of [true, false]) {
-  test(`T11 shops diagnostics: thrown error itself carries exactly three control fields (responded=${responded})`, async () => {
+  test(`T11 shops diagnostics: thrown error itself carries exactly three control fields and two bisect fields (responded=${responded})`, async t => {
+    stubGlobalFetch(t);
     let requests = 0;
     await assert.rejects(fetchAuthorizedShops({
       accessToken: 'synthetic-diagnostics-access',
@@ -146,15 +159,88 @@ for (const responded of [true, false]) {
       assert.equal(error.control_responded, responded);
       assert.equal(error.control_http, responded ? 400 : null);
       assert.equal(error.control_threw_name, responded ? null : 'UnknownError');
+      assert.deepEqual(error.bisect_known_host, { responded, http: responded ? 400 : null, threw: responded ? null : 'UnknownError' });
+      assert.deepEqual(error.bisect_bare_fetch, { responded: false, http: null, threw: 'URIError' });
       assert.deepEqual(Object.keys(error).sort(), [
+        'bisect_bare_fetch', 'bisect_known_host',
         'control_http', 'control_responded', 'control_threw_name', 'diagnostic', 'name',
         'upstreamCode', 'upstreamErrorName', 'upstreamHttp',
       ]);
       assert.doesNotMatch(JSON.stringify(error), /synthetic|https?:|app_key|sign=|token=|cipher=|stack/i);
       return true;
     });
-    assert.equal(requests, 2);
+    assert.equal(requests, 3);
   });
+}
+
+for (const knownResponded of [true, false]) {
+  for (const bareResponded of [true, false]) {
+    test(`T11 shops diagnostics: bisect probes preserve request shapes and safe results (known=${knownResponded}, bare=${bareResponded})`, async t => {
+      const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
+      const order: string[] = [];
+      const controlResponse = Response.json({ message: PRIVATE_TEXT }, { status: 400 });
+      const knownResponse = Response.json({ message: PRIVATE_TEXT }, { status: 302 });
+      const bareResponse = Response.json({ message: PRIVATE_TEXT }, { status: 429 });
+      // Only status may be accessed: any body, JSON, text, or other access fails.
+      const statusOnly = (response: Response) => new Proxy(response, {
+        get(target, property) {
+          if (property === 'then') return undefined; // Promise resolution checks thenables.
+          assert.equal(property, 'status');
+          return target.status;
+        },
+      });
+      const knownError = new ReferenceError(PRIVATE_TEXT);
+      knownError.name = PRIVATE_TEXT;
+      knownError.stack = PRIVATE_TEXT;
+      let bareRequest: { url: string; init: RequestInit | undefined } | undefined;
+      stubGlobalFetch(t, async (url, init) => {
+        order.push('bare-fetch');
+        bareRequest = { url: String(url), init };
+        if (!bareResponded) throw { name: PRIVATE_TEXT, message: PRIVATE_TEXT, stack: PRIVATE_TEXT };
+        return statusOnly(bareResponse);
+      });
+      const result = await callback(async (url, init) => {
+        requests.push({ url: String(url), init });
+        if (requests.length === 1) {
+          order.push('real');
+          throw new TypeError(PRIVATE_TEXT);
+        }
+        if (requests.length === 2) {
+          order.push('control');
+          return statusOnly(controlResponse);
+        }
+        order.push('known-host');
+        if (!knownResponded) throw knownError;
+        return statusOnly(knownResponse);
+      });
+      assert.deepEqual(order, ['real', 'control', 'known-host', 'bare-fetch']);
+      assert.equal(requests.length, 3);
+      assert.deepEqual(requests[2], { url: 'https://example.com/', init: { method: 'GET', redirect: 'manual' } });
+      const control = requests[1];
+      assert.ok(control && bareRequest);
+      assert.equal(bareRequest.url, control.url);
+      assert.deepEqual(bareRequest.init, control.init);
+      assert.deepEqual(Object.keys(bareRequest.init ?? {}), ['headers']);
+      assert.deepEqual([...new Headers(bareRequest.init?.headers).keys()].sort(), ['accept', 'user-agent']);
+      assert.equal(new Headers(bareRequest.init?.headers).has('x-tts-access-token'), false);
+      const bareUrl = new URL(bareRequest.url);
+      assert.equal(bareUrl.origin, 'https://open-api.tiktokglobalshop.com');
+      assert.equal(bareUrl.pathname, '/authorization/202309/shops');
+      assert.deepEqual([...bareUrl.searchParams], [
+        ['app_key', 'synthetic-control-app-key'],
+        ['timestamp', String(Math.floor(NOW / 1000))],
+        ['sign', 'synthetic-control-sign'],
+      ]);
+      assert.equal(controlResponse.bodyUsed, false);
+      assert.equal(knownResponse.bodyUsed, false);
+      assert.equal(bareResponse.bodyUsed, false);
+      assertFailure(result, 'shops_fetch_thrown', null, {
+        upstream_error_name: 'TypeError', control_responded: true, control_http: 400, control_threw_name: null,
+        bisect_known_host: { responded: knownResponded, http: knownResponded ? 302 : null, threw: knownResponded ? null : 'ReferenceError' },
+        bisect_bare_fetch: { responded: bareResponded, http: bareResponded ? 429 : null, threw: bareResponded ? null : 'UnknownError' },
+      });
+    });
+  }
 }
 
 test('T11 shops diagnostics: internal plain Error outside handled response branches is distinct', async () => {
@@ -174,19 +260,25 @@ test('T11 shops diagnostics: invalid null response is an internal TypeError', as
   assertFailure(result, 'shops_internal_error', null, { upstream_error_name: 'TypeError' });
 });
 
-test('T11 shops diagnostics: non-Error fetch throw uses a fixed safe fallback', async () => {
+test('T11 shops diagnostics: non-Error fetch throw uses a fixed safe fallback', async t => {
+  stubGlobalFetch(t);
   const result = await callback(async () => { throw PRIVATE_TEXT; });
   assertFailure(result, 'shops_fetch_thrown', null, {
     upstream_error_name: 'UnknownError', control_responded: false, control_http: null, control_threw_name: 'UnknownError',
+    bisect_known_host: { responded: false, http: null, threw: 'UnknownError' },
+    bisect_bare_fetch: { responded: false, http: null, threw: 'URIError' },
   });
 });
 
-test('T11 shops diagnostics: custom Error name cannot become response text', async () => {
+test('T11 shops diagnostics: custom Error name cannot become response text', async t => {
+  stubGlobalFetch(t);
   const CustomError = class extends Error {};
   Object.defineProperty(CustomError, 'name', { value: PRIVATE_TEXT });
   const result = await callback(async () => { throw new CustomError(PRIVATE_TEXT); });
   assertFailure(result, 'shops_fetch_thrown', null, {
     upstream_error_name: 'Error', control_responded: false, control_http: null, control_threw_name: 'Error',
+    bisect_known_host: { responded: false, http: null, threw: 'Error' },
+    bisect_bare_fetch: { responded: false, http: null, threw: 'URIError' },
   });
 });
 
