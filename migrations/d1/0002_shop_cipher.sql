@@ -1,0 +1,43 @@
+-- T11 D1 迁移 0002：给 shop_tokens 表加 shop_cipher 列（SQLite 方言）。
+-- 与 src/tiktok/d1.ts 里的 SHOP_TOKENS_SCHEMA_SQL 保持一致（该文件在 scope
+-- 之后列出 shop_cipher；ALTER TABLE 实际把新列追加到表尾，列顺序不同，
+-- 但所有 SQL 都用显式列名，与顺序无关）。
+--
+-- shop_cipher 说明：授权店铺接口返回的每家店的 cipher 字段，即以后调业务
+-- 接口要用的店铺凭证。它本身不是 Token，存明文 TEXT（与 shop_code/market
+-- 同级）；access_token / refresh_token 仍用 TOKEN_ENCRYPTION_KEY 加密存。
+-- shop_cipher 绝不出现在回调响应与日志里。
+--
+-- 执行方式（只用一种，不要重复跑）：
+--   在 Cloudflare Dashboard → D1 → muse-erp → Console 里粘贴本文件最后的
+--   ALTER 语句执行。不要把本文件内容写进代码仓库以外的普通文件，也不要
+--   在聊天里发任何 Token / cipher / 密钥值（本文件不含任何值）。
+--
+-- 执行前只读核查（必须先做，缺一不可）：
+--   PRAGMA table_info('shop_tokens');
+--     → 必须恰好 8 列：shop_code, market, access_token_enc,
+--       refresh_token_enc, expires_at, scope, created_at, updated_at，
+--       且其中没有 shop_cipher 列。
+--   SELECT COUNT(*) FROM shop_tokens;
+--     → 必须为 0（此前没有一次授权成功存库，无数据丢失风险）。
+--   若列数不是 8、已有 shop_cipher 列、或行数不是 0，立即停下，不要跑
+--   本迁移，先汇报核查结果。
+--
+-- 执行后只读核查（必须做）：
+--   PRAGMA table_info('shop_tokens');
+--     → 必须为 9 列，且包含 shop_cipher（位置在表尾，属 ALTER 正常行为）。
+--   SELECT COUNT(*) FROM shop_tokens;
+--     → 必须仍为 0。
+--   两项不符即为迁移失败，按回滚处理。
+--
+-- 幂等警告：本语句只能跑一次。列已存在时再跑会报错（duplicate column），
+--   那不是数据损坏，停下并汇报即可，不要改语句重跑、不要删列重建。
+--
+-- 回滚：
+--   第一次成功存 Token 之前：表是空的，可 DROP TABLE shop_tokens 后用
+--   migrations/d1/0001_shop_tokens.sql 重建原来 8 列的表，再只读核查
+--   8 列、0 行。代码侧 CREATE TABLE IF NOT EXISTS 不会给已存在的表加列，
+--   所以回滚后、重跑迁移前不要做新的真实授权。
+--   第一次成功存 Token 之后：禁止 DROP 表回滚（会丢 Token 与 cipher），
+--   只能重新授权恢复。
+ALTER TABLE shop_tokens ADD COLUMN shop_cipher TEXT NOT NULL DEFAULT '';
