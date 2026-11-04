@@ -1,3 +1,5 @@
+> Historical implementation notes. OAuth behavior has been superseded by [B0-B3-OAUTH.md](B0-B3-OAUTH.md); do not use the former public authorize or token-only mapping flow.
+
 # T10 真实接入代码（窄范围）
 
 本分支在 PR #2（fix/workers-preview-build，head 3988c1f）基础上实现 T10 硬需求，

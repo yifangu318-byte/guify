@@ -10,12 +10,13 @@
     "dev": "tsx watch src/server.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
-    "test": "node --import tsx --test --test-isolation=none test/*.test.ts",
+    "test": "node scripts/test-local.mjs",
     "db:generate": "drizzle-kit generate",
     "mcp:stdio": "node dist/mcp-stdio.js",
-    "mcp:smoke": "node scripts/mcp-smoke.mjs",
+    "mcp:smoke": "node scripts/test-local.mjs --mcp-smoke",
     "db:migrate:local": "node scripts/db-migrate-local.mjs",
-    "db:verify:local": "bash scripts/db-verify-local.sh"
+    "db:verify:local": "bash scripts/db-verify-local.sh",
+    "worker:check": "node scripts/worker-check.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.2",
@@ -26,6 +27,7 @@
   "devDependencies": {
     "@types/node": "^24.0.0",
     "drizzle-kit": "^0.31.0",
+    "miniflare": "5.20261023.3-beta",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0",
     "wrangler": "4.156.0"

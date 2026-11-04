@@ -8,6 +8,8 @@
     "pino": "./node_modules/pino/pino.js"
   },
   "previews": {},
+  "keep_vars": true,
+  "vars": {"MUSE_ENV":"simulation","TIKTOK_OAUTH_ENABLED":"false","MUSE_RELEASE":"2026-11-04-b0-b3"},
   // D1 绑定：变量名 DB，数据库 muse-erp，后台已建好并绑定。
   // 数据库 ID 为 Cloudflare 后台的资源标识（非密钥），部署前请在后台核对一次；
   // Secret（TOKEN_ENCRYPTION_KEY、TIKTOK_APP_KEY、TIKTOK_APP_SECRET）只放
@@ -16,7 +18,8 @@
     {
       "binding": "DB",
       "database_name": "muse-erp",
-      "database_id": "a2978531-26d3-4b04-a837-30f031b4b2e5"
+      "database_id": "a2978531-26d3-4b04-a837-30f031b4b2e5",
+      "migrations_dir": "migrations/d1"
     }
   ]
 }

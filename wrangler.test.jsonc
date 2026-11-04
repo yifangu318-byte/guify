@@ -1,0 +1,10 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "muse-erp-local-test",
+  "main": "workers/entry.js",
+  "compatibility_date": "2026-10-30",
+  "compatibility_flags": ["nodejs_compat"],
+  "alias": {"pino": "./node_modules/pino/pino.js"},
+  "vars": {"MUSE_ENV":"test","TIKTOK_OAUTH_ENABLED":"false"},
+  "d1_databases": [{"binding":"DB","database_name":"muse-isolated-test","database_id":"00000000-0000-0000-0000-000000000003","migrations_dir":"migrations/d1"}]
+}

@@ -154,3 +154,9 @@ test('malformed logs fail closed', () => {
   assert.equal(JSON.parse(logs.read()).msg, 'Log serialization failed');
   assert.ok(!logs.read().includes('synthetic-raw-credential'));
 });
+
+test('website root uses a fixed local redirect and health can identify a deployed release',async t=>{
+ const app=buildApp(loadConfig({}),capture().stream,{},{},{getRelease:()=> 'synthetic-release'});t.after(()=>app.close());
+ const root=await app.inject('/?next=https://evil.invalid');assert.equal(root.statusCode,302);assert.equal(root.headers.location,'/web/');
+ assert.equal((await app.inject('/health')).json().release,'synthetic-release');
+});

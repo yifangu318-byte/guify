@@ -1,135 +1,40 @@
-import { test } from 'node:test';
+import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import { Writable } from 'node:stream';
-import { buildApp } from '../src/app.js';
-import { loadConfig } from '../src/config.js';
-import { verifyState, STATE_TTL_MS } from '../src/tiktok/crypto.js';
-
-// T11 authorize endpoint tests. All values below are synthetic test-only
-// placeholders; they never correspond to a real app, shop, secret, or token.
-const TEST_SECRET = 'synthetic-test-secret-t11-authorize-only';
-const TEST_SERVICE_ID = 'synthetic-service-id-t11-authorize-only';
-
-function capture() {
-  let text = '';
-  const stream = new Writable({ write(chunk, _encoding, callback) { text += chunk.toString(); callback(); } });
-  return { stream, read: () => text };
+import {Writable} from 'node:stream';
+import {buildApp} from '../src/app.js';
+import {fixture,SECRET,TARGET} from './oauth-fixture.js';
+const ADMIN='synthetic-admin-token-01234567890123456789';
+async function appFixture(t:any) {
+ const f=await fixture();let logs='';
+ const app=buildApp({host:'127.0.0.1',port:0},new Writable({write(c,e,cb){logs+=c;cb();}}),{},{},{tiktok:{getSecret:()=>SECRET,getAppKey:()=>f.deps.appKey,getAppSecret:()=>f.deps.appSecret,
+ getDb:()=>f.db,getServiceId:()=> 'synthetic-service',getAdminToken:()=>ADMIN,getTargets:()=>JSON.stringify([TARGET]),getEnvironment:()=> 'test',getEnabled:()=> 'true',getPublicUrl:()=> 'https://erp.test',fetchImpl:f.deps.fetchImpl,now:f.deps.now}});
+ t.after(()=>app.close());return {...f,app,logs:()=>logs};
 }
-
-function appWith(tiktok: Record<string, unknown>, logs: ReturnType<typeof capture>) {
-  // @ts-expect-error test-only runtime shape, matching buildApp's TiktokRuntime
-  return buildApp(loadConfig({}), logs.stream, {}, {}, { tiktok });
-}
-
-test('T11 authorize rejects missing, blank, or non-allowlisted market with 400 and no redirect', async t => {
-  const logs = capture();
-  const app = appWith({ getSecret: () => TEST_SECRET, getServiceId: () => TEST_SERVICE_ID }, logs);
-  t.after(() => app.close());
-  for (const query of [
-    '',
-    '?market=',
-    '?market=%20%20%20',
-    '?market=US',
-    '?market=CN',
-    '?market=my',
-    '?market=MY&market=PH',
-  ]) {
-    const response = await app.inject(`/api/tiktok/authorize${query}`);
-    assert.equal(response.statusCode, 400, query);
-    assert.deepEqual(response.json(), { error: true, message: 'Invalid authorize request', code: 'INVALID_REQUEST' });
-    assert.equal(response.headers.location, undefined);
-    assert.equal(response.headers['cache-control'], 'no-store');
-  }
+for(const authorization of [undefined,'Bearer bad','Basic synthetic',`Bearer ${ADMIN} extra`]) test(`authorize requires admin ${authorization?.slice(0,12)}`,async t=>{
+ const f=await appFixture(t);const r=await f.app.inject({url:'/api/tiktok/authorize?market=MY&shop_id=synthetic-shop',headers:{host:'erp.test',...(authorization?{authorization}:{})}});
+ assert.equal(r.statusCode,401);assert.equal(f.calls.length,0);
 });
-
-test('T11 authorize without encryption key returns 503 TOKEN_ENCRYPTION_KEY_MISSING and no redirect', async t => {
-  const logs = capture();
-  const app = appWith({ getSecret: () => undefined, getServiceId: () => TEST_SERVICE_ID }, logs);
-  t.after(() => app.close());
-  const response = await app.inject('/api/tiktok/authorize?market=MY');
-  assert.equal(response.statusCode, 503);
-  assert.equal(response.json().code, 'TOKEN_ENCRYPTION_KEY_MISSING');
-  assert.equal(response.headers.location, undefined);
-  assert.equal(response.headers['cache-control'], 'no-store');
+for(const query of ['', '?market=MY','?market=MY&shop_id=unknown','?market=SG&shop_id=synthetic-shop','?market=MY&market=PH&shop_id=synthetic-shop','?market=MY&shop_id=synthetic-shop&redirect_uri=https://evil.test']) test(`authorize rejects target/query ${query}`,async t=>{
+ const f=await appFixture(t);const r=await f.app.inject({url:'/api/tiktok/authorize'+query,headers:{host:'erp.test',authorization:`Bearer ${ADMIN}`}});assert.equal(r.statusCode,400);assert.equal(f.calls.length,0);
 });
-
-test('T11 authorize without Service ID returns 503 SERVICE_ID_MISSING and no redirect', async t => {
-  for (const serviceId of [undefined, '   ']) {
-    const logs = capture();
-    const app = appWith({ getSecret: () => TEST_SECRET, getServiceId: () => serviceId }, logs);
-    t.after(() => app.close());
-    const response = await app.inject('/api/tiktok/authorize?market=MY');
-    assert.equal(response.statusCode, 503);
-    assert.equal(response.json().code, 'SERVICE_ID_MISSING');
-    assert.equal(response.headers.location, undefined);
-    assert.equal(response.headers['cache-control'], 'no-store');
-  }
+for(const headers of [{origin:'https://evil.test'},{host:'evil.test'},{'sec-fetch-site':'cross-site'}]) test(`authorize origin guard ${JSON.stringify(headers)}`,async t=>{
+ const f=await appFixture(t);const r=await f.app.inject({url:'/api/tiktok/authorize?market=MY&shop_id=synthetic-shop',headers:{host:'erp.test',authorization:`Bearer ${ADMIN}`,...headers}});assert.equal(r.statusCode,403);
 });
-
-test('T11 authorize with valid MY returns 302 to ROW host with service_id and state only', async t => {
-  const logs = capture();
-  // No getAppKey / getAppSecret getters: the endpoint must not need them.
-  const app = appWith({ getSecret: () => TEST_SECRET, getServiceId: () => TEST_SERVICE_ID }, logs);
-  t.after(() => app.close());
-  const response = await app.inject('/api/tiktok/authorize?market=MY');
-  assert.equal(response.statusCode, 302);
-  assert.equal(response.headers['cache-control'], 'no-store');
-  const location = response.headers.location as string;
-  const url = new URL(location);
-  assert.equal(`${url.protocol}//${url.host}${url.pathname}`, 'https://services.tiktokshop.com/open/authorize');
-  assert.deepEqual([...url.searchParams.keys()].sort(), ['service_id', 'state']);
-  assert.equal(url.searchParams.get('service_id'), TEST_SERVICE_ID);
-  assert.ok(url.searchParams.get('state'));
-  assert.ok(!location.includes('app_key'));
-  assert.ok(!location.includes('redirect_uri'));
-  assert.ok(!location.includes('scope'));
-  assert.ok(!location.includes('services.us.tiktokshop.com'));
+test('authorize persists browser-bound state then full HTTP callback succeeds without credentials escaping',async t=>{
+ const f=await appFixture(t);const r=await f.app.inject({url:'/api/tiktok/authorize?market=MY&shop_id=synthetic-shop',headers:{host:'erp.test',authorization:`Bearer ${ADMIN}`}});
+ assert.equal(r.statusCode,302);const url=new URL(r.headers.location!);assert.equal(url.origin,'https://services.tiktokshop.com');
+ assert.deepEqual([...url.searchParams.keys()].sort(),['service_id','state']);
+ const cookie=String(r.headers['set-cookie']);assert.match(cookie,/Secure; HttpOnly; SameSite=Lax/);
+ const response=await f.app.inject({url:'/api/tiktok/callback?code=synthetic-code&state='+encodeURIComponent(url.searchParams.get('state')!),headers:{host:'erp.test',cookie:cookie.split(';')[0]!}});
+ assert.equal(response.statusCode,200);assert.equal(response.json().market,'MY');assert.equal(f.calls.length,2);
+ for(const secret of [SECRET,ADMIN,'synthetic-access','synthetic-refresh','synthetic-code','synthetic-cipher',url.searchParams.get('state')!]) assert.ok(!(response.body+f.logs()).includes(secret));
 });
-
-test('T11 authorize state verifies with verifyState, carries market, and expires in 10 minutes', async t => {
-  const logs = capture();
-  const app = appWith({ getSecret: () => TEST_SECRET, getServiceId: () => TEST_SERVICE_ID }, logs);
-  t.after(() => app.close());
-  for (const market of ['MY', 'PH', 'SG', 'TH', 'VN']) {
-    const response = await app.inject(`/api/tiktok/authorize?market=${market}`);
-    assert.equal(response.statusCode, 302, market);
-    const state = new URL(response.headers.location as string).searchParams.get('state') as string;
-    const now = Date.now();
-    const verified = verifyState(TEST_SECRET, state, now);
-    assert.deepEqual(verified, { valid: true, market, expiresAt: verified.valid ? verified.expiresAt : 0 });
-    if (verified.valid) {
-      assert.ok(verified.expiresAt > now);
-      assert.ok(verified.expiresAt - now <= STATE_TTL_MS);
-      assert.ok(verified.expiresAt - now > STATE_TTL_MS - 60_000);
-      assert.equal(verified.shopCode, undefined);
-    }
-    assert.deepEqual(verifyState('synthetic-wrong-secret-t11-only', state, now).valid, false);
-  }
+test('authorize JSON option supports same-origin authenticated browser bootstrap',async t=>{
+ const f=await appFixture(t);const r=await f.app.inject({url:'/api/tiktok/authorize?market=MY&shop_id=synthetic-shop',headers:{host:'erp.test',authorization:`Bearer ${ADMIN}`,accept:'application/json'}});
+ assert.equal(r.statusCode,200);assert.ok(r.json().authorization_url);assert.ok(r.headers['set-cookie']);
 });
-
-test('T11 authorize log contains event and market only, never state or Service ID', async t => {
-  const logs = capture();
-  const app = appWith({ getSecret: () => TEST_SECRET, getServiceId: () => TEST_SERVICE_ID }, logs);
-  t.after(() => app.close());
-  const response = await app.inject('/api/tiktok/authorize?market=MY');
-  assert.equal(response.statusCode, 302);
-  const state = new URL(response.headers.location as string).searchParams.get('state') as string;
-  const text = logs.read();
-  assert.ok(text.includes('tiktok_authorize_issued'));
-  assert.ok(text.includes('MY'));
-  assert.ok(!text.includes(state));
-  assert.ok(!text.includes(TEST_SERVICE_ID));
-  assert.ok(!text.includes(TEST_SECRET));
-});
-
-test('T11 authorize ignores unknown params and never forwards shop_code or redirect_uri', async t => {
-  const logs = capture();
-  const app = appWith({ getSecret: () => TEST_SECRET, getServiceId: () => TEST_SERVICE_ID }, logs);
-  t.after(() => app.close());
-  const response = await app.inject('/api/tiktok/authorize?market=MY&shop_code=synthetic-shop&redirect_uri=https%3A%2F%2Fexample.invalid%2Fcb&scope=synthetic-scope');
-  assert.equal(response.statusCode, 302);
-  const url = new URL(response.headers.location as string);
-  assert.deepEqual([...url.searchParams.keys()].sort(), ['service_id', 'state']);
-  assert.ok(!url.toString().includes('synthetic-shop'));
-  assert.ok(!url.toString().includes('example.invalid'));
+test('callback rejects duplicate browser cookies and cross-host requests',async t=>{
+ const f=await appFixture(t);for(const headers of [{host:'evil.test'},{host:'erp.test',cookie:'__Host-muse_oauth=x; __Host-muse_oauth=y'}]) {
+ const r=await f.app.inject({url:'/api/tiktok/callback?code=synthetic-code&state='+encodeURIComponent(f.state),headers});assert.equal(r.statusCode,400);}
+ assert.equal(f.calls.length,0);
 });

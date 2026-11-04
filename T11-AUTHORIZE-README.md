@@ -1,3 +1,5 @@
+> Historical implementation notes. OAuth behavior has been superseded by [B0-B3-OAUTH.md](B0-B3-OAUTH.md); do not use the former public authorize or token-only mapping flow.
+
 # T11 authorize endpoint — local implementation only
 
 Status: LOCAL ONLY, 2026-11-02. Not merged, not deployed, no PR,

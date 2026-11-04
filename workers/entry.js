@@ -18,6 +18,7 @@ import { loadConfig } from '../src/config.ts';
 //   D1 绑定存在绝不等于已连真实店铺。
 const app = buildApp(loadConfig(), undefined, {}, {}, {
   pluginTimeout: 0,
+  getRelease: () => env.MUSE_RELEASE,
   databaseHealth: async () => {
     try {
       const db = env.DB;
@@ -36,7 +37,12 @@ const app = buildApp(loadConfig(), undefined, {}, {}, {
     getRelaySecret: () => env.RELAY_SECRET,
     getServiceId: () => env.TIKTOK_SERVICE_ID,
     getDb: () => env.DB,
-    fetchImpl: fetch,
+    getAdminToken: () => env.MUSE_OAUTH_ADMIN_TOKEN,
+    getTargets: () => env.TIKTOK_SHOP_TARGETS,
+    getEnvironment: () => env.MUSE_ENV,
+    getEnabled: () => env.TIKTOK_OAUTH_ENABLED,
+    getPublicUrl: () => env.PUBLIC_URL,
+    getRelayAllowedOrigin: () => env.RELAY_ALLOWED_ORIGIN,
     now: Date.now,
   },
 });

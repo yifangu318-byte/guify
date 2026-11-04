@@ -1,6 +1,6 @@
 import { Writable } from 'node:stream';
 
-const sensitiveKey = /secret|token|password|key|cipher|authorization/i;
+const sensitiveKey = /secret|token|password|key|cipher|authorization|auth_code|state|cookie|^sign$/i;
 
 export function redact(value: unknown, secrets: readonly string[] = [], seen = new WeakSet<object>()): unknown {
   if (typeof value === 'string') {

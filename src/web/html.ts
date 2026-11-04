@@ -69,5 +69,5 @@ export function documentHtml(input: {
     <title>${escapeHtml(title)} · MUSE ERP</title><style>${css}</style></head><body>
     <header><p>MUSE ERP · 只读模拟后台</p><nav aria-label="后台导航">${pages.map(([key, label]) => `<a href="${escapeHtml(href(key, scope))}"${key === page || (page === 'detail' && key === 'orders') ? ' aria-current="page"' : ''}>${label}</a>`).join('')}</nav></header>
     <main><h1>${escapeHtml(title)}</h1>${metadata}${form}<section class="panel">${body}</section></main>
-    <footer>仍是模拟骨架，未接真实数据。持久化待 PG 就绪。仅本地模拟只读展示。</footer></body></html>`;
+    <footer>当前展示模拟数据，未接真实数据。仅供只读查看。</footer></body></html>`;
 }

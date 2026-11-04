@@ -10,7 +10,7 @@ const cases = [
   ['/api/shops/demo/orders', 401, 'application/json'],
   ['/missing', 404, 'application/json', body => assert.equal(JSON.parse(body).code, 'NOT_FOUND')],
   ['/api/tiktok/callback', 400, 'application/json'],
-  ['/api/tiktok/callback?code=smoke&state=smoke', 501, 'application/json'],
+  ['/api/tiktok/callback?code=smoke&state=smoke', 503, 'application/json'],
 ];
 for (const [path, status, contentType, check] of cases) {
   const response = await fetch(new URL(path, base), { signal: AbortSignal.timeout(5000) });

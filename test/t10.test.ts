@@ -104,52 +104,10 @@ test('T10 D1 模拟：落库、读取、冲突更新均可用，密文不含明�
   assert.equal(read?.refreshToken, 'synthetic-refresh-t10');
 });
 
-test('T10 回调：缺凭证时明确报错，不用模拟 Token 冒充成功', async () => {
-  const db = new MockD1();
-  const state = issueState(TEST_SECRET, { now: () => NOW, nonce: 'test-nonce-abcdef12' }).state;
-  const noSecret = await handleTikTokCallback({ code: 'synthetic-code', state }, { db, now: () => NOW });
-  assert.equal(noSecret.status, 503);
-  assert.equal(noSecret.body.code, 'TOKEN_ENCRYPTION_KEY_MISSING');
-  const noCreds = await handleTikTokCallback({ code: 'synthetic-code', state }, { secret: TEST_SECRET, db, now: () => NOW });
-  assert.equal(noCreds.status, 503);
-  assert.equal(noCreds.body.code, 'APP_CREDENTIALS_MISSING');
-  assert.equal(noCreds.body.message, '未配置应用凭证，无法换 Token');
-  const noDb = await handleTikTokCallback({ code: 'synthetic-code', state }, { secret: TEST_SECRET, appKey: 'synthetic-app-key', appSecret: 'synthetic-app-secret', now: () => NOW });
-  assert.equal(noDb.status, 503);
-  assert.equal(noDb.body.code, 'DATABASE_UNAVAILABLE');
-});
-
-test('T10 回调：换 Token 成功后加密落 D1，响应不含任何 Token', async () => {
-  const db = new MockD1();
-  const state = issueState(TEST_SECRET, { now: () => NOW, nonce: 'test-nonce-12345678', shopCode: 'TEST_SHOP', market: 'MY' }).state;
-  const good = await handleTikTokCallback({ code: 'synthetic-code-t10', state }, {
-    secret: TEST_SECRET, appKey: 'synthetic-app-key', appSecret: 'synthetic-app-secret', db, now: () => NOW,
-    exchange: async () => ({ accessToken: 'synthetic-access-t10', refreshToken: 'synthetic-refresh-t10', expiresInSec: 3600, shopId: 'TEST_SHOP', scope: 'test.scope' }),
-  });
-  assert.equal(good.status, 200);
-  assert.deepEqual(good.body, { error: false, shop_code: 'TEST_SHOP', market: 'MY', expires_at: NOW + 3600_000 });
-  assert.ok(!JSON.stringify(good.body).includes('synthetic-access-t10'));
-  const read = await readDecryptedShopToken(db, TEST_SECRET, 'TEST_SHOP');
-  assert.equal(read?.accessToken, 'synthetic-access-t10');
-});
-
-test('T10 回调：换 Token 失败与店铺不一致均不落库、不假装成功', async () => {
-  const db = new MockD1();
-  const state = issueState(TEST_SECRET, { now: () => NOW, nonce: 'test-nonce-12345678', shopCode: 'TEST_SHOP', market: 'MY' }).state;
-  const failed = await handleTikTokCallback({ code: 'synthetic-code-t10', state }, {
-    secret: TEST_SECRET, appKey: 'synthetic-app-key', appSecret: 'synthetic-app-secret', db, now: () => NOW,
-    exchange: async () => { throw new Error('synthetic-upstream-failure'); },
-  });
-  assert.equal(failed.status, 502);
-  assert.equal(failed.body.code, 'UPSTREAM_ERROR');
-  assert.equal(await getEncryptedShopToken(db, 'TEST_SHOP'), undefined);
-  const mismatch = await handleTikTokCallback({ code: 'synthetic-code-t10', state }, {
-    secret: TEST_SECRET, appKey: 'synthetic-app-key', appSecret: 'synthetic-app-secret', db, now: () => NOW,
-    exchange: async () => ({ accessToken: 'synthetic-access-t10', refreshToken: 'synthetic-refresh-t10', expiresInSec: 3600, shopId: 'OTHER_SHOP', scope: '' }),
-  });
-  assert.equal(mismatch.status, 400);
-  assert.equal(mismatch.body.code, 'SHOP_MISMATCH');
-  assert.equal(await getEncryptedShopToken(db, 'TEST_SHOP'), undefined);
+test('T10 callback without a durable browser session fails closed before token exchange', async () => {
+  const state = issueState(TEST_SECRET, {now:()=>NOW}).state;
+  const result = await handleTikTokCallback({code:'synthetic-code',state},{secret:TEST_SECRET,appKey:'synthetic-app',appSecret:'synthetic-secret',now:()=>NOW});
+  assert.equal(result.status,503);
 });
 
 test('T10 健康检查：D1 探针通过报 configured_verified，无绑定保持 not_configured', async t => {

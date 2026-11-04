@@ -1,3 +1,5 @@
+> OAuth lifecycle changes, environment isolation, migration gates and current local checks: [B0-B3-OAUTH.md](B0-B3-OAUTH.md). OAuth defaults disabled. Existing manual migrations must be reconciled before any remote migration; production remains separately approval-gated.
+
 # Cloudflare Workers deployment
 
 This repository is a Node 24 / TypeScript / Fastify server, not a static site.
