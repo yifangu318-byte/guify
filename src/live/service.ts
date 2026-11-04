@@ -3,7 +3,7 @@ import {D1OAuthStore,hash,type LifecycleDb} from '../tiktok/vault.js';
 import {getValidAccessToken} from '../tiktok/refresh.js';
 import {readSnapshot} from './client.js';
 import {LiveError,limitDiagnostic,type Resource,type Window} from './models.js';
-export interface LiveConfig {db:LifecycleDb;appKey:string;appSecret:string;secret:string;fetchImpl?:typeof fetch;now?:()=>number;sleep?:(ms:number)=>Promise<void>}
+export interface LiveConfig {db:LifecycleDb;appKey:string;appSecret:string;secret:string;productLimit?:1000|2000;fetchImpl?:typeof fetch;now?:()=>number;sleep?:(ms:number)=>Promise<void>}
 interface ScopeRow {id:string;version:number;market:string;cipher:string;scopes_json:string;status:string;access_expires_at:number;refresh_expires_at:number;key_version:string}
 interface SnapshotRow {snapshot_json:string|null;range_start:number|null;range_end:number|null;last_success_at:number|null;last_attempt_at:number;last_error:string|null;upstream_code:number|null;lease_until:number|null}
 export const scopes={products:'seller.product.basic',orders:'seller.order.info'} as const;

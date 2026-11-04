@@ -13,6 +13,7 @@ export interface TiktokRuntime {
   getAdminToken?: () => string | undefined; getTargets?: () => string | undefined;
   getEnvironment?: () => string | undefined; getEnabled?: () => string | undefined; getPublicUrl?: () => string | undefined;
   getLiveEnabled?: () => string | undefined;
+  getProductLimit?: () => string | undefined;
   fetchImpl?: typeof fetch; now?: () => number;
 }
 export function registerOAuth(app: FastifyInstance, runtime: TiktokRuntime = {}) {

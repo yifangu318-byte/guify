@@ -52,6 +52,20 @@ test('record limits expose only safe numeric diagnostics and preserve them witho
  assert.equal(response.statusCode,502);assert.equal(response.json().code,'SYNC_LIMIT_EXCEEDED');assert.deepEqual(response.json().limit,{kind:'records',limit:1000,actual:1001});assert.ok(!response.body.includes('synthetic-private'));
  const saved=await app.inject({url:'/api/live/shops/'+TARGET.shopId+'/products',headers});assert.equal(saved.json().data,null);assert.equal(saved.json().synced_at,null);assert.equal(saved.json().last_error,'SYNC_LIMIT_EXCEEDED');assert.deepEqual(saved.json().limit,{kind:'records',limit:1000,actual:1001});
 });
+test('expanded product capacity is explicit, covers 1570 complete records, and never raises order capacity',async()=>{
+ let calls=0;const fetchImpl:typeof fetch=async(url)=>{
+  const query=new URL(String(url)).searchParams;assert.equal(query.get('page_size'),'100');const page=Number(query.get('page_token')??0),start=page*100;calls++;
+  return json({total_count:1570,products:Array.from({length:Math.min(100,1570-start)},(_,i)=>({...upstreamProduct,id:'product-'+(start+i)})),...(start+100<1570?{next_page_token:String(page+1)}:{})});
+ };
+ await assert.rejects(()=>readSnapshot({...opts,fetchImpl}),(e:any)=>e.limit?.actual===1570&&e.limit?.limit===1000);assert.equal(calls,1);calls=0;
+ const rows=await readSnapshot({...opts,productLimit:2000,fetchImpl});assert.equal(rows.length,1570);assert.equal(calls,16);
+ await assert.rejects(()=>readSnapshot({...opts,productLimit:2000,resource:'orders',window,fetchImpl:async()=>json({total_count:1001,orders:[]})}),(e:any)=>e.limit?.limit===1000);
+});
+test('product capacity configuration accepts only explicit approved capacity levels',async t=>{
+ const f=await ready();const app=await routes(f,async()=>{throw new Error();},{getProductLimit:()=> '2000'});t.after(()=>app.close());
+ assert.deepEqual((await app.inject({url:'/api/live/shops',headers})).json().limits,{products:2000,orders:1000});
+ const invalid=await routes(f,async()=>{throw new Error();},{getProductLimit:()=> '100000'});t.after(()=>invalid.close());assert.equal((await invalid.inject({url:'/api/live/shops',headers})).statusCode,503);
+});
 test('projection keeps precise prices and platform statuses, omits all buyer and credential fields',()=>{
  const p=product(upstreamProduct);assert.equal(p.product_id,upstreamProduct.id);assert.equal(p.skus![0]!.tax_exclusive_price,'0.10');assert.equal(p.skus![0]!.inventory![0]!.quantity,0);
  const o=order(upstreamOrder,window);assert.equal(o.total_amount,'999999999999999.01');assert.equal(o.status,'AWAITING_SHIPMENT');assert.ok(!JSON.stringify(o).includes('synthetic-private'));

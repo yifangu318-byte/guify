@@ -7,7 +7,7 @@ The public `/web/` pages remain explicitly simulation-only. `/live` uses the exi
 - Apply **only** `migrations/d1/0004_live_snapshots.sql` after separately approving the production database change. The previously applied authorization migration is version 3. Do not rerun the earlier migrations.
 - Set `MUSE_LIVE_READ_ENABLED=true` only after approving real read-only calls. Missing flag defaults to disabled. Environment must be `test`, `staging` or `production`.
 - Deployment configuration preserves Dashboard-managed flags using `keep_vars`; only the release label is in `wrangler.jsonc`. It does not reset an existing OAuth enablement.
-- No new scopes, credentials, cron jobs, or webhook permissions are installed automatically.
+- Optional approved catalog capacity: MUSE_LIVE_PRODUCT_LIMIT accepts only 1000 (default) or 2000. The 2000 level is disabled until separately approved and configured; order capacity remains 1000. No schema change is needed.
 - Initial production check: allowlisted first store only; complete product query plus an explicit recent order creation window. A successful authorization alone does not establish product or order access.
 
 ## Endpoint contract
@@ -34,7 +34,7 @@ API versions above are the versions inspected and implemented, not a claim that 
 
 ## Storage and failure behavior
 
-`live_snapshots` is keyed by app hash, shop ID and resource. It stores only projected business data plus timestamps/window/error category and a durable lease. A run is limited to 20 pages of 50 entries, 1,000 records, 512 KiB projected JSON, and a bounded upstream time budget. Snapshot size/count/response limits fail explicitly; partial pages never replace a successful snapshot. Repeated cursors, duplicate identities, missing arrays, and count mismatches are failures, not empty results. An explicit successful empty array is distinct from never synchronized.
+`live_snapshots` is keyed by app hash, shop ID and resource. It stores only projected business data plus timestamps/window/error category and a durable lease. A run is limited to 20 pages (products: 100 entries/page; orders: 50 entries/page), 32 upstream attempts and a bounded 55-second upstream time budget. Product capacity defaults to 1,000 records and 512 KiB projected JSON. Explicitly approved expanded product capacity allows 2,000 records and 1,900,000 bytes, below the documented 2,000,000-byte D1 row/string limit. Orders stay at 1,000 records and 512 KiB. Limit failures record only the category and numeric limit/actual values; authenticated error responses and cached metadata expose those safe diagnostics. Snapshot size/count/response limits fail explicitly; partial pages never replace a successful snapshot. Repeated cursors, duplicate identities, missing arrays, and count mismatches are failures, not empty results. An explicit successful empty array is distinct from never synchronized.
 
 Concurrent Workers acquire one 90-second lease per app/shop/resource and a 30-second attempt cooldown. Completion is fenced by owner and current authorization version. A stale run cannot overwrite the new owner's data or release its lease. Failure keeps the previous payload, success timestamp and order window, while separately recording the failed attempt. Neither a resource count nor an order total is a settlement metric. There is no cross-currency addition.
 

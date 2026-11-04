@@ -18,7 +18,10 @@ export function registerLive(app:FastifyInstance,runtime:TiktokRuntime){
     const appKey=read(runtime.getAppKey,'TIKTOK_APP_KEY'),appSecret=read(runtime.getAppSecret,'TIKTOK_APP_SECRET'),secret=read(runtime.getSecret,'TOKEN_ENCRYPTION_KEY'),db=runtime.getDb?.();
     if(!appKey||!appSecret||!secret||!/^[a-fA-F0-9]{64}$/.test(secret)||!db)throw new LiveError(503,'LIVE_UNAVAILABLE');
     const targets=parseTargets(read(runtime.getTargets,'TIKTOK_SHOP_TARGETS'));
-    const options:LiveConfig={db,appKey,appSecret,secret,...(runtime.fetchImpl?{fetchImpl:runtime.fetchImpl}:{}),...(runtime.now?{now:runtime.now}:{})};
+    const rawLimit=read(runtime.getProductLimit,'MUSE_LIVE_PRODUCT_LIMIT');
+    if(rawLimit!==undefined&&!['1000','2000'].includes(rawLimit))throw new LiveError(503,'LIVE_UNAVAILABLE');
+    const productLimit=rawLimit==='2000'?2000:1000;
+    const options:LiveConfig={db,appKey,appSecret,secret,productLimit,...(runtime.fetchImpl?{fetchImpl:runtime.fetchImpl}:{}),...(runtime.now?{now:runtime.now}:{})};
     return {enabled,targets,service:new LiveService(options)};
   };
   const protect=(handler:(request:FastifyRequest)=>Promise<unknown>)=>async(request:FastifyRequest,reply:any)=>{
@@ -36,7 +39,7 @@ export function registerLive(app:FastifyInstance,runtime:TiktokRuntime){
     const shops=[];
     for(const target of targets){const permissions={products:false,orders:false};for(const resource of ['products','orders'] as const){try{await service.scope(target.shopId,target.market,resource);permissions[resource]=true;}catch{}}
       shops.push({shop_id:target.shopId,market:target.market,permissions});}
-    return {source:'tiktok_api',enabled,database,shops};
+    return {source:'tiktok_api',enabled,database,limits:{products:service.config.productLimit??1000,orders:1000},shops};
   }));
   const scoped=(request:FastifyRequest)=>{
     const {service,targets,enabled}=config(request);if(!enabled)throw new LiveError(503,'LIVE_DISABLED');

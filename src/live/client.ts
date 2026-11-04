@@ -8,10 +8,15 @@ export function signJson(path:string,query:Readonly<Record<string,string>>,body:
   const canonical=Object.keys(query).filter(k=>k!=='sign'&&k!=='access_token').sort().map(k=>k+query[k]).join('');
   return createHmac('sha256',secret).update(secret+path+canonical+body+secret).digest('hex');
 }
-export async function readSnapshot(options:{resource:Resource;window?:Window;appKey:string;appSecret:string;accessToken:string;cipher:string;fetchImpl?:typeof fetch;now?:()=>number;sleep?:(ms:number)=>Promise<void>}):Promise<LiveProduct[]|LiveOrder[]> {
+export async function readSnapshot(options:{resource:Resource;window?:Window;productLimit?:1000|2000;appKey:string;appSecret:string;accessToken:string;cipher:string;fetchImpl?:typeof fetch;now?:()=>number;sleep?:(ms:number)=>Promise<void>}):Promise<LiveProduct[]|LiveOrder[]> {
   const now=options.now??Date.now,started=now(),sleep=options.sleep??(ms=>new Promise(resolve=>setTimeout(resolve,ms)));
   const limited=(kind:LimitDiagnostic['kind'],limit:number,actual:number)=>new LiveError(502,'SYNC_LIMIT_EXCEEDED',null,{kind,limit,actual});
   const path=paths[options.resource];if(!path||options.resource==='orders'&&!options.window)throw new LiveError(400,'INVALID_REQUEST');
+  if(options.productLimit!==undefined&&![1000,2000].includes(options.productLimit))throw new LiveError(503,'LIVE_UNAVAILABLE');
+  const recordLimit=options.resource==='products'?(options.productLimit??1000):1000;
+  const pageSize=options.resource==='products'?100:50;
+  // D1's documented row limit is 2,000,000 bytes; leave room for the other row columns.
+  const byteLimit=options.resource==='products'&&recordLimit===2000?1_900_000:512*1024;
   const body=JSON.stringify(options.resource==='products'?{status:'ALL'}:{create_time_ge:options.window!.start_at/1000,create_time_lt:options.window!.end_at/1000});
   const rows:Array<LiveProduct|LiveOrder>=[],seenIds=new Set<string>(),seenCursors=new Set<string>();let cursor='',total:number|undefined,attempts=0;
   for(let page=0;page<20;page++){
@@ -20,7 +25,7 @@ export async function readSnapshot(options:{resource:Resource;window?:Window;app
     for(let attempt=0;attempt<3;attempt++){
       if(++attempts>32)throw limited('requests',32,attempts);
       const remaining=55_000-(now()-started);if(remaining<=0)throw limited('duration',55_000,now()-started);
-      const query:Record<string,string>={app_key:options.appKey,timestamp:String(Math.floor(now()/1000)),shop_cipher:options.cipher,page_size:'50',...(cursor?{page_token:cursor}:{})};
+      const query:Record<string,string>={app_key:options.appKey,timestamp:String(Math.floor(now()/1000)),shop_cipher:options.cipher,page_size:String(pageSize),...(cursor?{page_token:cursor}:{})};
       if(options.resource==='orders')Object.assign(query,{sort_field:'create_time',sort_order:'ASC'});
       const url='https://open-api.tiktokglobalshop.com'+path+'?'+new URLSearchParams({...query,sign:signJson(path,query,body,options.appSecret)});
       try{data=await requestJson(options.fetchImpl??globalThis.fetch,url,{method:'POST',headers:{'Content-Type':'application/json',Accept:'application/json','x-tts-access-token':options.accessToken},body},Math.min(8000,remaining));break;}
@@ -31,13 +36,13 @@ export async function readSnapshot(options:{resource:Resource;window?:Window;app
     }
     if(!data||!Array.isArray(data[options.resource])||typeof data.total_count!=='number'||!Number.isSafeInteger(data.total_count)||data.total_count<0)throw new LiveError(502,'INVALID_UPSTREAM_DATA');
     if(total!==undefined&&total!==data.total_count)throw new LiveError(502,'INCOMPLETE_SNAPSHOT');total=data.total_count;
-    if(total>1000)throw limited('records',1000,total);
-    const list=data[options.resource] as unknown[];if(list.length>50)throw new LiveError(502,'INVALID_UPSTREAM_DATA');
+    if(total>recordLimit)throw limited('records',recordLimit,total);
+    const list=data[options.resource] as unknown[];if(list.length>pageSize)throw new LiveError(502,'INVALID_UPSTREAM_DATA');
     for(const raw of list){const item=options.resource==='products'?product(raw):order(raw,options.window!);const key='product_id'in item?item.product_id:item.order_id;
       if(seenIds.has(key))throw new LiveError(502,'INCOMPLETE_SNAPSHOT');seenIds.add(key);rows.push(item);
     }
     const next=data.next_page_token;
-    const bytes=Buffer.byteLength(JSON.stringify(rows),'utf8');if(bytes>512*1024)throw limited('bytes',512*1024,bytes);
+    const bytes=Buffer.byteLength(JSON.stringify(rows),'utf8');if(bytes>byteLimit)throw limited('bytes',byteLimit,bytes);
     if(next===undefined||next===null||next===''){
       if(rows.length!==total)throw new LiveError(502,'INCOMPLETE_SNAPSHOT');
       return rows as LiveProduct[]|LiveOrder[];
