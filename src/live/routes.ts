@@ -2,7 +2,7 @@ import type {FastifyInstance,FastifyRequest} from 'fastify';
 import type {TiktokRuntime} from '../tiktok/routes.js';
 import {authenticated,parseTargets} from '../tiktok/oauth.js';
 import {LiveService,type LiveConfig} from './service.js';
-import {LiveError,parseWindow,record,type Resource} from './models.js';
+import {LiveError,parseWindow,record,limitDiagnostic,type Resource} from './models.js';
 import {registerLivePage} from './page.js';
 export function registerLive(app:FastifyInstance,runtime:TiktokRuntime){
   registerLivePage(app);
@@ -26,7 +26,8 @@ export function registerLive(app:FastifyInstance,runtime:TiktokRuntime){
     try{return await handler(request);}catch(error){
       const safe=error instanceof LiveError?error:new LiveError(503,'LIVE_UNAVAILABLE');
       app.log.info({event:'live_data_request_failed',outcome:safe.code},'Live data request failed');
-      return reply.code(safe.status).send({error:true,code:safe.code,message:'真实数据请求未完成，请检查接入条件或稍后重试。',...(safe.upstreamCode!==null?{upstream_code:safe.upstreamCode}:{})});
+      const limit=limitDiagnostic(safe.limit);
+      return reply.code(safe.status).send({error:true,code:safe.code,message:'真实数据请求未完成，请检查接入条件或稍后重试。',...(safe.upstreamCode!==null?{upstream_code:safe.upstreamCode}:{}),...(limit?{limit}:{})});
     }
   };
   app.get('/api/live/shops',protect(async request=>{

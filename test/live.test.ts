@@ -46,6 +46,12 @@ test('retry-heavy pagination cannot exceed the per-run upstream request budget',
  await assert.rejects(()=>readSnapshot({...opts,fetchImpl:async()=>{calls++;if(calls%3!==0)return new Response('',{status:503});page++;return json({total_count:1000,products:Array.from({length:50},(_,i)=>({...upstreamProduct,id:'product-'+(page*50+i)})),next_page_token:'page-'+page});}}),(e:any)=>e.code==='SYNC_LIMIT_EXCEEDED');
  assert.equal(calls,32);
 });
+test('record limits expose only safe numeric diagnostics and preserve them without a schema change',async t=>{
+ const f=await ready();const app=await routes(f,async()=>json({total_count:1001,products:[],private:'synthetic-private-raw-response'}));t.after(()=>app.close());
+ const response=await app.inject({method:'POST',url:'/api/live/shops/'+TARGET.shopId+'/products/sync',headers,payload:{}});
+ assert.equal(response.statusCode,502);assert.equal(response.json().code,'SYNC_LIMIT_EXCEEDED');assert.deepEqual(response.json().limit,{kind:'records',limit:1000,actual:1001});assert.ok(!response.body.includes('synthetic-private'));
+ const saved=await app.inject({url:'/api/live/shops/'+TARGET.shopId+'/products',headers});assert.equal(saved.json().data,null);assert.equal(saved.json().synced_at,null);assert.equal(saved.json().last_error,'SYNC_LIMIT_EXCEEDED');assert.deepEqual(saved.json().limit,{kind:'records',limit:1000,actual:1001});
+});
 test('projection keeps precise prices and platform statuses, omits all buyer and credential fields',()=>{
  const p=product(upstreamProduct);assert.equal(p.product_id,upstreamProduct.id);assert.equal(p.skus![0]!.tax_exclusive_price,'0.10');assert.equal(p.skus![0]!.inventory![0]!.quantity,0);
  const o=order(upstreamOrder,window);assert.equal(o.total_amount,'999999999999999.01');assert.equal(o.status,'AWAITING_SHIPMENT');assert.ok(!JSON.stringify(o).includes('synthetic-private'));

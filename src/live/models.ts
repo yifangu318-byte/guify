@@ -4,8 +4,14 @@ export interface LiveInventory {warehouse_id:string;quantity:number}
 export interface LiveSku {sku_id:string;seller_sku:string|null;currency:string|null;tax_exclusive_price:string|null;sale_price:string|null;inventory:LiveInventory[]|null}
 export interface LiveProduct {product_id:string;title:string|null;status:string;created_at:number|null;updated_at:number|null;skus:LiveSku[]|null}
 export interface LiveOrder {order_id:string;status:string;created_at:number;updated_at:number|null;currency:string|null;total_amount:string|null}
+export interface LimitDiagnostic {kind:'records'|'bytes'|'duration'|'requests'|'pages';limit:number;actual:number}
 export class LiveError extends Error {
-  constructor(readonly status:number,readonly code:string,readonly upstreamCode:number|null=null){super('Live data request failed');}
+  constructor(readonly status:number,readonly code:string,readonly upstreamCode:number|null=null,readonly limit:LimitDiagnostic|null=null){super('Live data request failed');}
+}
+export function limitDiagnostic(value:unknown):LimitDiagnostic|null {
+  if(!record(value)||!['records','bytes','duration','requests','pages'].includes(String(value.kind))||typeof value.limit!=='number'||typeof value.actual!=='number'
+    ||!Number.isSafeInteger(value.limit)||!Number.isSafeInteger(value.actual)||value.limit<=0||value.actual<0)return null;
+  return {kind:value.kind as LimitDiagnostic['kind'],limit:value.limit,actual:value.actual};
 }
 export const record=(v:unknown):v is Record<string,unknown>=>!!v&&typeof v==='object'&&!Array.isArray(v);
 export function text(v:unknown,max=128):string {if(typeof v!=='string'||!v.trim()||v.length>max)throw new LiveError(502,'INVALID_UPSTREAM_DATA');return v;}

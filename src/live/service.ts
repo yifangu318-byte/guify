@@ -2,7 +2,7 @@ import {randomUUID} from 'node:crypto';
 import {D1OAuthStore,hash,type LifecycleDb} from '../tiktok/vault.js';
 import {getValidAccessToken} from '../tiktok/refresh.js';
 import {readSnapshot} from './client.js';
-import {LiveError,type Resource,type Window} from './models.js';
+import {LiveError,limitDiagnostic,type Resource,type Window} from './models.js';
 export interface LiveConfig {db:LifecycleDb;appKey:string;appSecret:string;secret:string;fetchImpl?:typeof fetch;now?:()=>number;sleep?:(ms:number)=>Promise<void>}
 interface ScopeRow {id:string;version:number;market:string;cipher:string;scopes_json:string;status:string;access_expires_at:number;refresh_expires_at:number;key_version:string}
 interface SnapshotRow {snapshot_json:string|null;range_start:number|null;range_end:number|null;last_success_at:number|null;last_attempt_at:number;last_error:string|null;upstream_code:number|null;lease_until:number|null}
@@ -28,8 +28,10 @@ export class LiveService {
     const row=await this.config.db.prepare('SELECT snapshot_json,range_start,range_end,last_success_at,last_attempt_at,last_error,upstream_code,lease_until FROM live_snapshots WHERE app_hash=? AND shop_id=? AND resource=?')
       .bind(this.appHash,shopId,resource).first<SnapshotRow>();
     const data=row?.snapshot_json?JSON.parse(row.snapshot_json) as unknown[]:null;
+    const parts=row?.last_error?.split('|')??[];
+    const limit=parts.length===4?limitDiagnostic({kind:parts[1],limit:Number(parts[2]),actual:Number(parts[3])}):null;
     return {source:'tiktok_api' as const,shop_id:shopId,market,resource,synced_at:row?.last_success_at??null,last_attempt_at:row?.last_attempt_at??null,
-      last_error:row?.last_error??null,upstream_code:row?.upstream_code??null,syncing:!!row?.lease_until&&row.lease_until>this.now(),
+      last_error:parts[0]??null,limit,upstream_code:row?.upstream_code??null,syncing:!!row?.lease_until&&row.lease_until>this.now(),
       window:resource==='orders'&&row?.range_start!==null&&row?.range_start!==undefined?{start_at:row.range_start,end_at:row.range_end}:null,data};
   }
   async sync(shopId:string,market:string,resource:Resource,window?:Window){
@@ -56,7 +58,7 @@ export class LiveService {
     }catch(error){
       const safe=error instanceof LiveError?error:new LiveError(503,'LIVE_SYNC_FAILED');
       await this.config.db.prepare('UPDATE live_snapshots SET last_error=?,upstream_code=?,lease_owner=NULL,lease_until=NULL WHERE app_hash=? AND shop_id=? AND resource=? AND lease_owner=?')
-        .bind(safe.code,safe.upstreamCode,this.appHash,shopId,resource,owner).run();
+        .bind(safe.limit?[safe.code,safe.limit.kind,safe.limit.limit,safe.limit.actual].join('|'):safe.code,safe.upstreamCode,this.appHash,shopId,resource,owner).run();
       throw safe;
     }
   }
