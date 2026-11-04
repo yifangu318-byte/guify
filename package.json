@@ -13,6 +13,7 @@
     "test": "node scripts/test-local.mjs",
     "db:generate": "drizzle-kit generate",
     "mcp:stdio": "node dist/mcp-stdio.js",
+    "mcp:live": "node dist/ai-stdio.js",
     "mcp:smoke": "node scripts/test-local.mjs --mcp-smoke",
     "db:migrate:local": "node scripts/db-migrate-local.mjs",
     "db:verify:local": "bash scripts/db-verify-local.sh",

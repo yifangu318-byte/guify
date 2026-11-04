@@ -1,0 +1,90 @@
+import {randomUUID} from 'node:crypto';
+import type {FastifyInstance,FastifyRequest,FastifyReply} from 'fastify';
+import type {TiktokRuntime} from '../tiktok/routes.js';
+import {authenticated,parseTargets} from '../tiktok/oauth.js';
+import {LiveService} from '../live/service.js';
+import {LiveError,record} from '../live/models.js';
+import {AiService,type AiClientRow} from './service.js';
+import {AiError,aiTools,instructions,isTool,type AiTool} from './contracts.js';
+import {aiOpenApi} from './openapi.js';
+import {registerAiPage} from './page.js';
+
+export function registerAi(app:FastifyInstance,runtime:TiktokRuntime){
+  registerAiPage(app);
+  const read=(getter:(()=>string|undefined)|undefined,name:string)=>getter?getter():process.env[name];
+  const enabled=()=>read(runtime.getAiEnabled,'MUSE_AI_API_ENABLED')==='true';
+  const config=(request:FastifyRequest)=>{
+    let origin:URL;
+    try{origin=new URL(read(runtime.getPublicUrl,'PUBLIC_URL')??'');if(origin.protocol!=='https:'||origin.pathname!=='/'||origin.search||origin.hash||origin.username||origin.password)throw new Error();}
+    catch{throw new AiError(503,'AI_UNAVAILABLE');}
+    if(request.headers.host!==origin.host||request.headers.origin&&request.headers.origin!==origin.origin||request.headers['sec-fetch-site']==='cross-site')throw new AiError(403,'FORBIDDEN');
+    if(!['test','staging','production'].includes(read(runtime.getEnvironment,'MUSE_ENV')??''))throw new AiError(503,'AI_UNAVAILABLE');
+    const db=runtime.getDb?.(),appKey=read(runtime.getAppKey,'TIKTOK_APP_KEY');
+    if(!db||!appKey)throw new AiError(503,'AI_UNAVAILABLE');
+    const targets=parseTargets(read(runtime.getTargets,'TIKTOK_SHOP_TARGETS')),now=runtime.now??Date.now;
+    // Reading cached snapshots needs neither app secret nor encryption key and never refreshes tokens.
+    const live=new LiveService({db,appKey,appSecret:'',secret:'',now,fetchImpl:async()=>{throw new Error('AI reads cannot contact upstream');}});
+    return new AiService({db,appKey,targets,live,now});
+  };
+  const safe=(handler:(request:FastifyRequest,reply:FastifyReply)=>Promise<unknown>)=>async(request:FastifyRequest,reply:FastifyReply)=>{
+    const requestId=randomUUID();reply.header('Cache-Control','no-store').header('Referrer-Policy','no-referrer').header('X-Content-Type-Options','nosniff').header('X-Request-ID',requestId);
+    try{return await handler(request,reply);}catch(error){
+      const e=error instanceof AiError||error instanceof LiveError?error:new AiError(503,'AI_UNAVAILABLE');
+      if(e instanceof AiError&&e.retryAfter)reply.header('Retry-After',e.retryAfter);
+      app.log.info({event:'ai_api_failed',request_id:requestId,status:e.status,code:e.code},'AI API request rejected');
+      return reply.code(e.status).send({error:true,code:e.code,message:'AI API request could not be completed.',request_id:requestId});
+    }
+  };
+  const admin=async(request:FastifyRequest)=>{
+    if(!authenticated(request.headers.authorization,read(runtime.getAdminToken,'MUSE_OAUTH_ADMIN_TOKEN')))throw new AiError(401,'UNAUTHORIZED');
+    const service=config(request);await service.ready();return service;
+  };
+  const noQuery=(request:FastifyRequest)=>{if(Object.keys(request.query as object).length)throw new AiError(400,'INVALID_REQUEST');};
+  app.get('/api/ai/openapi.json',async(_request,reply)=>reply.header('Cache-Control','no-store').send(aiOpenApi));
+  app.get('/api/ai/admin/status',safe(async request=>{
+    noQuery(request);
+    if(!authenticated(request.headers.authorization,read(runtime.getAdminToken,'MUSE_OAUTH_ADMIN_TOKEN')))throw new AiError(401,'UNAUTHORIZED');
+    const service=config(request);let database=false;try{await service.ready();database=true;}catch{}
+    return {enabled:enabled(),live_enabled:read(runtime.getLiveEnabled,'MUSE_LIVE_READ_ENABLED')==='true',database,
+      shops:service.options.targets.map(t=>({shop_id:t.shopId,market:t.market})),tools:aiTools,instructions};
+  }));
+  app.get('/api/ai/admin/clients',safe(async request=>{noQuery(request);return (await admin(request)).list();}));
+  app.post('/api/ai/admin/clients',{bodyLimit:8192},safe(async(request,reply)=>{
+    noQuery(request);const service=await admin(request);
+    const client=await service.create(request.body,[read(runtime.getAdminToken,'MUSE_OAUTH_ADMIN_TOKEN'),read(runtime.getAppSecret,'TIKTOK_APP_SECRET'),read(runtime.getSecret,'TOKEN_ENCRYPTION_KEY')]);
+    reply.code(201);return client;
+  }));
+  app.post('/api/ai/admin/clients/:id/revoke',{bodyLimit:1024},safe(async request=>{
+    noQuery(request);const service=await admin(request);
+    if(!record(request.body)||Object.keys(request.body).length)throw new AiError(400,'INVALID_REQUEST');
+    return service.revoke((request.params as {id:unknown}).id);
+  }));
+  const agent=async(request:FastifyRequest)=>{
+    if(typeof request.headers.authorization!=='string'||!/^Bearer [A-Za-z0-9_-]{32,256}$/.test(request.headers.authorization))throw new AiError(401,'UNAUTHORIZED');
+    const service=config(request);
+    if(!enabled()||read(runtime.getLiveEnabled,'MUSE_LIVE_READ_ENABLED')!=='true')throw new AiError(503,'AI_DISABLED');
+    await service.ready();const client=await service.authenticate(request.headers.authorization);return {service,client};
+  };
+  const invoke=async(service:AiService,client:AiClientRow,tool:unknown,args:unknown)=>{
+    let status=200,result:unknown;
+    try{result=await service.invoke(client,tool,args);}catch(error){status=error instanceof AiError||error instanceof LiveError?error.status:503;
+      await service.audit(client.id,'tool_call',status,isTool(tool)?tool:null,record(args)&&typeof args.shop_id==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(args.shop_id)?args.shop_id:null);throw error;}
+    await service.audit(client.id,'tool_call',status,isTool(tool)?tool:null,record(args)&&typeof args.shop_id==='string'?args.shop_id:null);
+    app.log.info({event:'ai_tool_read',client_id:client.id,tool,request_status:status},'AI read completed');return result;
+  };
+  app.get('/api/ai/tools',safe(async request=>{
+    const {service,client}=await agent(request);noQuery(request);
+    await service.audit(client.id,'tools_listed',200);return {tools:aiTools.filter(t=>service.allowedTools(client).includes(t.name)),instructions};
+  }));
+  app.post('/api/ai/tools/:tool',{bodyLimit:4096},safe(async request=>{
+    const {service,client}=await agent(request);noQuery(request);return invoke(service,client,(request.params as {tool:unknown}).tool,request.body);
+  }));
+  app.get('/api/ai/shops',safe(async request=>{const {service,client}=await agent(request);noQuery(request);return invoke(service,client,'list_shops',{});}));
+  app.get('/api/ai/shops/:shop_id/:resource',safe(async request=>{
+    const {service,client}=await agent(request),{shop_id,resource}=request.params as {shop_id:string;resource:string},query=request.query as Record<string,unknown>;
+    const tool=({products:'get_products',orders:'get_orders',inventory:'get_inventory'} as Record<string,AiTool>)[resource];
+    if(!tool)throw new AiError(404,'TOOL_NOT_FOUND');
+    if(Object.keys(query).some(k=>k!=='page'||resource==='orders')||query.page!==undefined&&(typeof query.page!=='string'||!/^([1-9]|1\d|20)$/.test(query.page)))throw new AiError(400,'INVALID_REQUEST');
+    return invoke(service,client,tool,{shop_id,...(query.page!==undefined?{page:Number(query.page)}:{})});
+  }));
+}

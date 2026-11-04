@@ -15,12 +15,12 @@ export async function fixture() {
   if (!mf) {
     mf=new Miniflare(convertV4MiniflareOptions({name:'oauth-tests',modules:true,script:'export default {fetch(){return new Response("test");}}',compatibilityDate:'2026-10-30',d1Databases:{DB:'isolated-oauth-tests'}}));
     database=await mf.getD1Database('DB');
-    for (const file of ['0001_shop_tokens.sql','0002_shop_cipher.sql','0003_oauth_lifecycle.sql','0004_live_snapshots.sql']) {
+    for (const file of ['0001_shop_tokens.sql','0002_shop_cipher.sql','0003_oauth_lifecycle.sql','0004_live_snapshots.sql','0005_ai_api.sql']) {
       const sql=await readFile(new URL(`../migrations/d1/${file}`,import.meta.url),'utf8');
       for(const statement of sql.replace(/--[^\n]*/g,'').split(';').map(s=>s.trim()).filter(Boolean)) await database.prepare(statement).run();
     }
   }
-  for (const table of ['live_snapshots','oauth_audit','authorized_shops','authorizations','oauth_sessions','shop_tokens']) await database.prepare(`DELETE FROM ${table}`).run();
+  for (const table of ['ai_api_audit','ai_api_clients','live_snapshots','oauth_audit','authorized_shops','authorizations','oauth_sessions','shop_tokens']) await database.prepare(`DELETE FROM ${table}`).run();
   const store=new D1OAuthStore(database);
   let time=NOW;
   const state=issueState(SECRET,{now:()=>time,market:TARGET.market,shopCode:TARGET.shopId}).state;

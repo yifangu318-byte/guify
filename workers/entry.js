@@ -42,6 +42,7 @@ const app = buildApp(loadConfig(), undefined, {}, {}, {
     getEnvironment: () => env.MUSE_ENV,
     getEnabled: () => env.TIKTOK_OAUTH_ENABLED,
     getLiveEnabled: () => env.MUSE_LIVE_READ_ENABLED,
+    getAiEnabled: () => env.MUSE_AI_API_ENABLED,
     getProductLimit: () => env.MUSE_LIVE_PRODUCT_LIMIT,
     getPublicUrl: () => env.PUBLIC_URL,
     getRelayAllowedOrigin: () => env.RELAY_ALLOWED_ORIGIN,

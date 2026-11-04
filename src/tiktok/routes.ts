@@ -5,6 +5,7 @@ import { authenticated, browserCookie, handleTikTokCallback, parseTargets } from
 import { D1OAuthStore, hash, type LifecycleDb } from './vault.js';
 import { registerConnectionPage } from './connection-page.js';
 import { registerLive } from '../live/routes.js';
+import { registerAi } from '../ai/routes.js';
 
 export interface TiktokRuntime {
   getSecret?: () => string | undefined; getAppKey?: () => string | undefined; getAppSecret?: () => string | undefined;
@@ -14,11 +15,13 @@ export interface TiktokRuntime {
   getEnvironment?: () => string | undefined; getEnabled?: () => string | undefined; getPublicUrl?: () => string | undefined;
   getLiveEnabled?: () => string | undefined;
   getProductLimit?: () => string | undefined;
+  getAiEnabled?: () => string | undefined;
   fetchImpl?: typeof fetch; now?: () => number;
 }
 export function registerOAuth(app: FastifyInstance, runtime: TiktokRuntime = {}) {
   registerConnectionPage(app);
   registerLive(app,runtime);
+  registerAi(app,runtime);
   const read = (getter: (() => string | undefined) | undefined, name: string) => getter ? getter() : process.env[name];
   const settings = () => ({
     secret: read(runtime.getSecret,'TOKEN_ENCRYPTION_KEY'), appKey: read(runtime.getAppKey,'TIKTOK_APP_KEY'), appSecret: read(runtime.getAppSecret,'TIKTOK_APP_SECRET'),
