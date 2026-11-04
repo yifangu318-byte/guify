@@ -2,7 +2,8 @@ import type { FastifyInstance } from 'fastify';
 import { randomBytes } from 'node:crypto';
 import { issueState } from './crypto.js';
 import { authenticated, browserCookie, handleTikTokCallback, parseTargets } from './oauth.js';
-import { D1OAuthStore, type LifecycleDb } from './vault.js';
+import { D1OAuthStore, hash, type LifecycleDb } from './vault.js';
+import { registerConnectionPage } from './connection-page.js';
 
 export interface TiktokRuntime {
   getSecret?: () => string | undefined; getAppKey?: () => string | undefined; getAppSecret?: () => string | undefined;
@@ -13,6 +14,7 @@ export interface TiktokRuntime {
   fetchImpl?: typeof fetch; now?: () => number;
 }
 export function registerOAuth(app: FastifyInstance, runtime: TiktokRuntime = {}) {
+  registerConnectionPage(app);
   const read = (getter: (() => string | undefined) | undefined, name: string) => getter ? getter() : process.env[name];
   const settings = () => ({
     secret: read(runtime.getSecret,'TOKEN_ENCRYPTION_KEY'), appKey: read(runtime.getAppKey,'TIKTOK_APP_KEY'), appSecret: read(runtime.getAppSecret,'TIKTOK_APP_SECRET'),
@@ -23,6 +25,38 @@ export function registerOAuth(app: FastifyInstance, runtime: TiktokRuntime = {})
     relayUrl: read(runtime.getRelayUrl,'RELAY_URL'), relaySecret: read(runtime.getRelaySecret,'RELAY_SECRET'), relayAllowedOrigin: read(runtime.getRelayAllowedOrigin,'RELAY_ALLOWED_ORIGIN'),
   });
   const error = (code: string, message: string) => ({ error: true, code, message });
+  // Administrator-only preflight: never returns credential values, cipher text or seller subjects.
+  app.get('/api/tiktok/connection', async (request,reply) => {
+    reply.header('Cache-Control','no-store').header('Referrer-Policy','no-referrer');
+    if (!authenticated(request.headers.authorization,read(runtime.getAdminToken,'MUSE_OAUTH_ADMIN_TOKEN')))
+      return reply.code(401).send(error('UNAUTHORIZED','Authorization required'));
+    const config = settings();
+    let origin: URL | undefined;
+    try {
+      const candidate = new URL(config.publicUrl ?? '');
+      if (candidate.protocol === 'https:' && !candidate.username && !candidate.password && !candidate.search && !candidate.hash && candidate.pathname === '/') origin = candidate;
+    } catch { /* Report only a boolean configuration check. */ }
+    if (request.headers['sec-fetch-site'] === 'cross-site' || (origin && (request.headers.host !== origin.host || (request.headers.origin && request.headers.origin !== origin.origin))))
+      return reply.code(403).send(error('FORBIDDEN','Authorization origin rejected'));
+    let database = false;
+    if (config.db) { try { await new D1OAuthStore(config.db).ready(); database = true; } catch { /* No raw DB errors. */ } }
+    const checks = {
+      enabled: config.enabled && ['test','staging','production'].includes(config.environment),
+      public_origin: !!origin, application: !!config.appKey && !!config.appSecret && !!config.serviceId?.trim(),
+      encryption_key: !!config.secret && /^[a-fA-F0-9]{64}$/.test(config.secret), database, targets: config.targets.length > 0,
+    };
+    const targets = [];
+    for (const target of config.targets) {
+      let status = 'not_connected';
+      if (database && config.db && config.appKey) {
+        const row = await config.db.prepare('SELECT a.status, a.access_expires_at, a.refresh_expires_at FROM authorizations a JOIN authorized_shops s ON s.authorization_id=a.id WHERE s.app_hash=? AND s.tiktok_shop_id=?')
+          .bind(hash(config.appKey),target.shopId).first<{status:string;access_expires_at:number;refresh_expires_at:number}>();
+        if (row) status = row.status === 'active' && row.refresh_expires_at <= (runtime.now ?? Date.now)() ? 'reauthorize_required' : row.status;
+      }
+      targets.push({shop_id:target.shopId,market:target.market,status});
+    }
+    return {ready:Object.values(checks).every(Boolean),checks,targets};
+  });
   app.get<{ Querystring: { market?: unknown; shop_id?: unknown } }>('/api/tiktok/authorize', async (request,reply) => {
     reply.header('Cache-Control','no-store').header('Referrer-Policy','no-referrer');
     const config = settings();

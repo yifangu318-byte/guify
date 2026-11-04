@@ -9,7 +9,7 @@
   },
   "previews": {},
   "keep_vars": true,
-  "vars": {"MUSE_ENV":"simulation","TIKTOK_OAUTH_ENABLED":"false","MUSE_RELEASE":"2026-11-04-b0-b3"},
+  "vars": {"MUSE_ENV":"simulation","TIKTOK_OAUTH_ENABLED":"false","MUSE_RELEASE":"2026-11-04-connect"},
   // D1 绑定：变量名 DB，数据库 muse-erp，后台已建好并绑定。
   // 数据库 ID 为 Cloudflare 后台的资源标识（非密钥），部署前请在后台核对一次；
   // Secret（TOKEN_ENCRYPTION_KEY、TIKTOK_APP_KEY、TIKTOK_APP_SECRET）只放

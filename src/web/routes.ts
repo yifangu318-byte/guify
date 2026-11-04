@@ -98,7 +98,7 @@ export function registerWeb(app: FastifyInstance, options: WebOptions, audit: We
           : !scope ? '<p>请显式选择统计窗口，传入 start_at 与 end_at（Unix 毫秒）。</p>'
             : await pageBody(page, service, scope, shop, time, order_id);
         return reply.type('text/html; charset=utf-8').send(documentHtml({ page, title, shopIds: service.shopIds, queried_at: time,
-          ...(shop_id ? { shop_id } : {}), ...(scope ? { scope } : {}), body }));
+          ...(shop_id ? { shop_id } : {}), ...(scope ? { scope } : {}), body: (page === 'connections' ? '<p><a href="/connect">连接真实 TikTok 店铺</a></p>' : '') + body }));
       } catch (error) {
         const status = error instanceof GatewayError ? error.statusCode : 500;
         return reply.code(status).send(errorBody(status));

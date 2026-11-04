@@ -117,6 +117,7 @@ for (const [path, title] of routes) {
     assert.doesNotMatch(r.body, /改价|改库存|取消订单|发客户消息|达人邀约|<script\b|\son[a-z]+\s*=/i);
     for (const match of r.body.matchAll(/href="([^"]*)"/g)) {
       const target = match[1]!;
+      if (path === '/web/connections' && target === '/connect') continue;
       assert.ok(target.startsWith('/web/')); assert.ok(target.includes(`shop_id=${A}`));
       assert.ok(target.includes(`start_at=${START}`)); assert.ok(target.includes(`end_at=${END}`));
     }
