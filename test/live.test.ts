@@ -9,6 +9,7 @@ import {LiveService} from '../src/live/service.js';
 import {readSnapshot,signJson} from '../src/live/client.js';
 import {LiveError,parseWindow,product,order} from '../src/live/models.js';
 import {registerOAuth} from '../src/tiktok/routes.js';
+import {buildApp} from '../src/app.js';
 const admin='synthetic-live-administrator-123456789';
 const headers={authorization:`Bearer ${admin}`,host:'erp.example.test',origin:'https://erp.example.test'};
 const window={start_at:NOW-86400000,end_at:NOW};
@@ -138,6 +139,11 @@ test('live feature flag is separate, defaults disabled, and old simulation pages
  const info=await app.inject({url:'/api/live/shops',headers});assert.equal(info.json().enabled,false);assert.equal(info.json().database,true);
  assert.equal((await app.inject({method:'POST',url:'/api/live/shops/'+TARGET.shopId+'/products/sync',headers,payload:{}})).json().code,'LIVE_DISABLED');assert.equal(calls,0);
 });
+test('site root follows the live enable flag while keeping unauthenticated business requests protected',async t=>{
+ for(const enabled of ['false','true']){const app=buildApp({port:0,host:'127.0.0.1'},undefined,{}, {},{tiktok:{getLiveEnabled:()=>enabled}});t.after(()=>app.close());
+  const root=await app.inject('/');assert.equal(root.statusCode,302);assert.equal(root.headers.location,enabled==='true'?'/live':'/web/');assert.equal((await app.inject('/api/live/shops')).statusCode,401);
+ }
+});
 test('API rejects unknown filters, client-supplied cipher and malformed order windows before network',async t=>{
  const f=await ready();let calls=0;const app=await routes(f,async()=>{calls++;throw new Error();});t.after(()=>app.close());
  for(const [resource,payload] of [['products',{shop_cipher:'evil'}],['orders',{}],['orders',{...window,access_token:'evil'}],['orders',{...window,end_at:NOW+1000}]] as const){const result=await app.inject({method:'POST',url:'/api/live/shops/'+TARGET.shopId+'/'+resource+'/sync',headers,payload});assert.equal(result.statusCode,400);assert.ok(!result.body.includes('evil'));}
@@ -172,6 +178,17 @@ test('live page displays invalid credential errors and discards in-flight result
  let release!:(r:Response)=>void;const pending=pageHarness(script,async()=>new Promise<Response>(r=>release=r));pending.get('credential').value=admin;pending.dispatch('access','submit');pending.get('credential').value='';pending.dispatch('credential','input');
  release(new Response(JSON.stringify({enabled:true,database:true,shops:[{shop_id:TARGET.shopId,market:'MY',permissions:{products:true,orders:true}}]})));await settle();assert.equal(pending.get('controls').hidden,true);assert.equal(pending.get('shop').children.length,0);
  denied.dispatch('logout','click');assert.equal(denied.get('credential').value,'');assert.equal(denied.get('controls').hidden,true);
+});
+test('live page navigates cached product pages and displays total snapshot coverage',async t=>{
+ const f=await ready();const app=await routes(f,async()=>{throw new Error();});t.after(()=>app.close());const script=(await app.inject('/live.js')).body;
+ const requests:string[]=[];const page=pageHarness(script,async(url)=>{const path=String(url);requests.push(path);
+  if(path==='/api/live/shops')return new Response(JSON.stringify({enabled:true,database:true,shops:[{shop_id:TARGET.shopId,market:'MY',permissions:{products:true,orders:false}}]}));
+  const current=Number(new URL(path,'https://erp.example.test').searchParams.get('page'));
+  return new Response(JSON.stringify({resource:'products',shop_id:TARGET.shopId,synced_at:NOW,window:null,last_error:null,data:[product({...upstreamProduct,id:'product-'+current})],pagination:{page:current,page_count:2,total_count:2}}));
+ });
+ page.get('credential').value=admin;page.dispatch('access','submit');await settle();await settle();assert.match(page.get('products-pagination').textContent,/全量快照 2 条；第 1 \/ 2 页/);assert.equal(page.get('products-next').disabled,false);
+ page.dispatch('products-next','click');await settle();await settle();assert.match(page.get('products-pagination').textContent,/第 2 \/ 2 页/);assert.equal(page.get('products-next').disabled,true);assert.equal(page.get('products-prev').disabled,false);assert.ok(requests.some(path=>path.endsWith('products?page=2')));
+ page.dispatch('logout','click');assert.equal(page.get('products-pagination').textContent,'');assert.equal(page.get('credential').value,'');
 });
 test('draft products and unassigned seller SKUs remain explicitly unknown rather than failing or becoming zero',()=>{
  const result=product({id:'draft',status:'DRAFT',title:'',skus:[{id:'sku',seller_sku:'',price:{currency:'',sale_price:''}}]});

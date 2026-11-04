@@ -44,12 +44,15 @@ export function registerLive(app:FastifyInstance,runtime:TiktokRuntime){
   const scoped=(request:FastifyRequest)=>{
     const {service,targets,enabled}=config(request);if(!enabled)throw new LiveError(503,'LIVE_DISABLED');
     const {shop_id,resource}=request.params as {shop_id:string;resource:Resource};
-    if(!['products','orders'].includes(resource)||Object.keys(request.query as object).length)throw new LiveError(400,'INVALID_REQUEST');
+    const query=request.query as Record<string,unknown>;
+    if(!['products','orders'].includes(resource)||Object.keys(query).some(k=>resource!=='products'||request.method!=='GET'||k!=='page'))throw new LiveError(400,'INVALID_REQUEST');
+    if(query.page!==undefined&&(typeof query.page!=='string'||!/^[1-9]\d?$/.test(query.page)||Number(query.page)>20))throw new LiveError(400,'INVALID_REQUEST');
+    const page=query.page===undefined?1:Number(query.page);
     const target=targets.find(t=>t.shopId===shop_id);if(!target)throw new LiveError(404,'SHOP_NOT_FOUND');
-    return {service,target,resource};
+    return {service,target,resource,page};
   };
   app.get('/api/live/shops/:shop_id/:resource',protect(async request=>{
-    const {service,target,resource}=scoped(request);return service.snapshot(target.shopId,target.market,resource);
+    const {service,target,resource,page}=scoped(request);return service.snapshot(target.shopId,target.market,resource,page);
   }));
   app.post('/api/live/shops/:shop_id/:resource/sync',{bodyLimit:1024},protect(async request=>{
     const {service,target,resource}=scoped(request);

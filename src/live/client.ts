@@ -8,17 +8,16 @@ export function signJson(path:string,query:Readonly<Record<string,string>>,body:
   const canonical=Object.keys(query).filter(k=>k!=='sign'&&k!=='access_token').sort().map(k=>k+query[k]).join('');
   return createHmac('sha256',secret).update(secret+path+canonical+body+secret).digest('hex');
 }
-export async function readSnapshot(options:{resource:Resource;window?:Window;productLimit?:1000|2000;appKey:string;appSecret:string;accessToken:string;cipher:string;fetchImpl?:typeof fetch;now?:()=>number;sleep?:(ms:number)=>Promise<void>}):Promise<LiveProduct[]|LiveOrder[]> {
+export interface ReadOptions {resource:Resource;window?:Window;productLimit?:1000|2000;appKey:string;appSecret:string;accessToken:string;cipher:string;fetchImpl?:typeof fetch;now?:()=>number;sleep?:(ms:number)=>Promise<void>}
+export async function readPages(options:ReadOptions,onPage:(items:Array<LiveProduct|LiveOrder>)=>void|Promise<void>):Promise<{count:number}> {
   const now=options.now??Date.now,started=now(),sleep=options.sleep??(ms=>new Promise(resolve=>setTimeout(resolve,ms)));
   const limited=(kind:LimitDiagnostic['kind'],limit:number,actual:number)=>new LiveError(502,'SYNC_LIMIT_EXCEEDED',null,{kind,limit,actual});
   const path=paths[options.resource];if(!path||options.resource==='orders'&&!options.window)throw new LiveError(400,'INVALID_REQUEST');
   if(options.productLimit!==undefined&&![1000,2000].includes(options.productLimit))throw new LiveError(503,'LIVE_UNAVAILABLE');
   const recordLimit=options.resource==='products'?(options.productLimit??1000):1000;
   const pageSize=options.resource==='products'?100:50;
-  // D1's documented row limit is 2,000,000 bytes; leave room for the other row columns.
-  const byteLimit=options.resource==='products'&&recordLimit===2000?1_900_000:512*1024;
   const body=JSON.stringify(options.resource==='products'?{status:'ALL'}:{create_time_ge:options.window!.start_at/1000,create_time_lt:options.window!.end_at/1000});
-  const rows:Array<LiveProduct|LiveOrder>=[],seenIds=new Set<string>(),seenCursors=new Set<string>();let cursor='',total:number|undefined,attempts=0;
+  const seenIds=new Set<string>(),seenCursors=new Set<string>();let cursor='',total:number|undefined,attempts=0;
   for(let page=0;page<20;page++){
     if(now()-started>55_000)throw limited('duration',55_000,now()-started);
     let data:Record<string,unknown>|undefined;
@@ -38,17 +37,27 @@ export async function readSnapshot(options:{resource:Resource;window?:Window;pro
     if(total!==undefined&&total!==data.total_count)throw new LiveError(502,'INCOMPLETE_SNAPSHOT');total=data.total_count;
     if(total>recordLimit)throw limited('records',recordLimit,total);
     const list=data[options.resource] as unknown[];if(list.length>pageSize)throw new LiveError(502,'INVALID_UPSTREAM_DATA');
+    const rows:Array<LiveProduct|LiveOrder>=[];
     for(const raw of list){const item=options.resource==='products'?product(raw):order(raw,options.window!);const key='product_id'in item?item.product_id:item.order_id;
       if(seenIds.has(key))throw new LiveError(502,'INCOMPLETE_SNAPSHOT');seenIds.add(key);rows.push(item);
     }
     const next=data.next_page_token;
-    const bytes=Buffer.byteLength(JSON.stringify(rows),'utf8');if(bytes>byteLimit)throw limited('bytes',byteLimit,bytes);
+    const bytes=Buffer.byteLength(JSON.stringify(rows),'utf8');if(bytes>8_000_000)throw limited('bytes',8_000_000,bytes);
+    await onPage(rows);
     if(next===undefined||next===null||next===''){
-      if(rows.length!==total)throw new LiveError(502,'INCOMPLETE_SNAPSHOT');
-      return rows as LiveProduct[]|LiveOrder[];
+      if(seenIds.size!==total)throw new LiveError(502,'INCOMPLETE_SNAPSHOT');
+      return {count:seenIds.size};
     }
     if(typeof next!=='string'||next.length>4096||!list.length||seenCursors.has(next))throw new LiveError(502,'INCOMPLETE_SNAPSHOT');
     seenCursors.add(next);cursor=next;await sleep(100);
   }
   throw limited('pages',20,21);
+}
+/** Small uncompressed consumer retained for order snapshots and adapter tests. */
+export async function readSnapshot(options:ReadOptions):Promise<LiveProduct[]|LiveOrder[]> {
+  const result:Array<LiveProduct|LiveOrder>=[];let bytes=2;
+  const byteLimit=options.resource==='products'&&options.productLimit===2000?1_900_000:512*1024;
+  await readPages(options,items=>{for(const item of items){bytes+=Buffer.byteLength(JSON.stringify(item),'utf8')+(result.length?1:0);
+      if(bytes>byteLimit)throw new LiveError(502,'SYNC_LIMIT_EXCEEDED',null,{kind:'bytes',limit:byteLimit,actual:bytes});result.push(item);}});
+  return result as LiveProduct[]|LiveOrder[];
 }

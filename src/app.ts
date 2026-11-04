@@ -42,7 +42,10 @@ export function buildApp(config: Config, destination?: NodeJS.WritableStream, ga
     const release = runtimeOptions.getRelease?.();
     return { status: 'ok', service: 'muse-erp', version: '0.1.0', database: { status: databaseStatus }, ...(release ? { release } : {}) };
   });
-  app.get('/', async (_request,reply) => reply.code(302).header('Cache-Control','no-store').header('Location','/web/').send());
+  app.get('/', async (_request,reply) => {
+    const live=(runtimeOptions.tiktok?.getLiveEnabled?runtimeOptions.tiktok.getLiveEnabled():process.env.MUSE_LIVE_READ_ENABLED)==='true';
+    return reply.code(302).header('Cache-Control','no-store').header('Location',live?'/live':'/web/').send();
+  });
   registerOAuth(app, runtimeOptions.tiktok);
   app.setNotFoundHandler((_request, reply) => {
     return reply.code(404).send({ error: true, message: 'Route not found', code: 'NOT_FOUND' });
