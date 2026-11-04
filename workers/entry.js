@@ -41,6 +41,7 @@ const app = buildApp(loadConfig(), undefined, {}, {}, {
     getTargets: () => env.TIKTOK_SHOP_TARGETS,
     getEnvironment: () => env.MUSE_ENV,
     getEnabled: () => env.TIKTOK_OAUTH_ENABLED,
+    getLiveEnabled: () => env.MUSE_LIVE_READ_ENABLED,
     getPublicUrl: () => env.PUBLIC_URL,
     getRelayAllowedOrigin: () => env.RELAY_ALLOWED_ORIGIN,
     now: Date.now,

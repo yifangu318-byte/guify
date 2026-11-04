@@ -67,7 +67,7 @@ export function documentHtml(input: {
     <details><summary>模拟窗口示例（UTC）</summary><p>2026-10-01 至 2026-11-01：start_at=${demoWindow.start_at}，end_at=${demoWindow.end_at}。需选择店铺并明确提交。</p></details>`;
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
     <title>${escapeHtml(title)} · MUSE ERP</title><style>${css}</style></head><body>
-    <header><p>MUSE ERP · 只读模拟后台</p><nav aria-label="后台导航">${pages.map(([key, label]) => `<a href="${escapeHtml(href(key, scope))}"${key === page || (page === 'detail' && key === 'orders') ? ' aria-current="page"' : ''}>${label}</a>`).join('')}</nav></header>
+    <header><p>MUSE ERP · 只读模拟后台</p><nav aria-label="后台导航"><a href="/live">真实店铺数据</a>${pages.map(([key, label]) => `<a href="${escapeHtml(href(key, scope))}"${key === page || (page === 'detail' && key === 'orders') ? ' aria-current="page"' : ''}>${label}</a>`).join('')}</nav></header>
     <main><h1>${escapeHtml(title)}</h1>${metadata}${form}<section class="panel">${body}</section></main>
     <footer>当前展示模拟数据，未接真实数据。仅供只读查看。</footer></body></html>`;
 }
