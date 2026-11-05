@@ -4,7 +4,9 @@ export class UpstreamError extends Error {
     super('Upstream request failed');
   }
 }
-export async function requestJson(fetchImpl: typeof fetch, url: string, init: RequestInit = {}, timeoutMs = 8000): Promise<Record<string, unknown>> {
+export async function requestJson(fetchImpl: typeof fetch, url: string, init: RequestInit|undefined, timeoutMs: number|undefined, envelope: 'business'): Promise<unknown>;
+export async function requestJson(fetchImpl: typeof fetch, url: string, init?: RequestInit, timeoutMs?: number): Promise<Record<string, unknown>>;
+export async function requestJson(fetchImpl: typeof fetch, url: string, init: RequestInit = {}, timeoutMs = 8000,envelope?:'business'): Promise<unknown> {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const work = async () => {
@@ -29,7 +31,12 @@ export async function requestJson(fetchImpl: typeof fetch, url: string, init: Re
     try { payload = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw new UpstreamError(response.status, 'invalid_response'); }
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new UpstreamError(response.status, 'invalid_response');
     const row = payload as Record<string, unknown>;
-    if (row.code !== 0 && row.code !== '0') throw new UpstreamError(response.status, 'business_error', typeof row.code === 'number' && Number.isSafeInteger(row.code) ? row.code : null);
+    if (row.code !== 0 && row.code !== '0') {
+      const code=typeof row.code==='number'?row.code:typeof row.code==='string'&&/^-?\d+$/.test(row.code)?Number(row.code):NaN;
+      if(!Number.isSafeInteger(code)||code===0)throw new UpstreamError(response.status,'invalid_response');
+      throw new UpstreamError(response.status, 'business_error', code);
+    }
+    if(envelope==='business')return row.data??null;
     if (!row.data || typeof row.data !== 'object' || Array.isArray(row.data)) throw new UpstreamError(response.status, 'invalid_response');
     return row.data as Record<string, unknown>;
   };

@@ -31,6 +31,21 @@ async function setup(overrides:Record<string,any>={}){
   const call=(tool:string,payload:unknown={shop_id:TARGET.shopId})=>app.inject({method:'POST',url:'/api/ai/tools/'+tool,headers:aiHeaders,payload});
   return {...f,app,create,call,outbound:()=>outbound};
 }
+test('official catalog is discoverable with the official tool grant and excludes authorization credentials and app management',async t=>{
+  const f=await setup({getOfficialEnabled:()=> 'true',getWriteEnabled:()=> 'true'});t.after(()=>f.app.close());
+  await f.create({...grant,tools:['list_shops']});
+  const url='/api/ai/tiktok/catalog';
+  assert.equal((await f.app.inject({url,headers:aiHeaders})).statusCode,403);
+  await f.db.prepare('UPDATE ai_api_clients SET tools_json=?').bind(JSON.stringify(['tiktok_request'])).run();
+  const discovery=await f.app.inject({url:'/api/ai/tools',headers:aiHeaders});
+  assert.equal(discovery.json().official_api.catalog,url);
+  const response=await f.app.inject({url,headers:aiHeaders});assert.equal(response.statusCode,200);
+  const data=response.json();assert.equal(data.source.package,'@tts-open-toolkit/cli');
+  assert.ok(data.endpoints.some((e:any)=>e.path==='/product/202309/files/upload'&&e.transport==='direct_upload'));
+  assert.ok(data.endpoints.some((e:any)=>e.path==='/authorization/202309/shops'&&e.method==='GET'));
+  assert.ok(data.endpoints.every((e:any)=>!['event','affiliate_creator','affiliate_partner'].includes(e.module)));
+  assert.ok(!response.body.includes('synthetic-access'));assert.equal(f.outbound(),0);
+});
 test('AI grants are admin-only, hash credentials and never return them; duplicate and administrator tokens rejected',async t=>{
   const f=await setup();t.after(()=>f.app.close());
   for(const headers of [{host},aiHeaders])assert.equal((await f.app.inject({method:'POST',url:'/api/ai/admin/clients',headers,payload:grant})).statusCode,401);

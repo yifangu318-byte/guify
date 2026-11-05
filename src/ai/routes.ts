@@ -9,6 +9,8 @@ import {AiError,aiTools,instructions,isTool,type AiTool} from './contracts.js';
 import {aiOpenApi} from './openapi.js';
 import {registerAiPage} from './page.js';
 import {invokeOfficial} from './official.js';
+import {officialBodyLimit,officialUploadPaths} from './official-upload.js';
+import {catalogPath,officialCatalog,reference} from './official-catalog.js';
 import {handoffMarkdown} from './handoff.js';
 import {resolveTargets} from '../tiktok/targets.js';
 
@@ -110,7 +112,16 @@ export function registerAi(app:FastifyInstance,runtime:TiktokRuntime){
   };
   app.get('/api/ai/tools',safe(async request=>{
     const {service,client}=await agent(request);noQuery(request);
-    await service.audit(client.id,'tools_listed',200);return {tools:availableTools().filter(t=>service.allowedTools(client).includes(t.name)),instructions};
+    await service.audit(client.id,'tools_listed',200);const tools=availableTools().filter(t=>service.allowedTools(client).includes(t.name));
+    return {tools,instructions,...(tools.some(t=>t.name==='tiktok_request')?{official_api:{catalog:catalogPath,reference,multipart_paths:writeEnabled()?officialUploadPaths:[]}}:{})};
+  }));
+  app.get(catalogPath,safe(async request=>{
+    noQuery(request);const {service,client}=await agent(request);
+    if(!officialEnabled()||!service.allowedTools(client).includes('tiktok_request'))throw new AiError(403,'TOOL_FORBIDDEN');
+    return officialCatalog(writeEnabled());
+  }));
+  app.post('/api/ai/tools/tiktok_request',{bodyLimit:officialBodyLimit},safe(async request=>{
+    const {service,client}=await agent(request);noQuery(request);return invoke(service,client,'tiktok_request',request.body);
   }));
   app.post('/api/ai/tools/:tool',{bodyLimit:73728},safe(async request=>{
     const {service,client}=await agent(request);noQuery(request);return invoke(service,client,(request.params as {tool:unknown}).tool,request.body);
