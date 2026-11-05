@@ -1,6 +1,6 @@
 import {aiTools,instructions} from './contracts.js';
 import type {Target} from '../tiktok/vault.js';
-export function handoffMarkdown(origin:string,targets:Target[],publicEnabled:boolean,officialEnabled:boolean,writeEnabled:boolean){
+export function handoffMarkdown(origin:string,targets:Target[],publicEnabled:boolean,officialEnabled:boolean,writeEnabled:boolean,grants:Array<{shop_id:string;status:string;scopes:string[]}>=[]){
   const tools=aiTools.filter(t=>officialEnabled||t.name!=='tiktok_request');
   return [
     '# MUSE ERP · AI 接入包','',
@@ -14,6 +14,7 @@ export function handoffMarkdown(origin:string,targets:Target[],publicEnabled:boo
     '- 工具发现：GET '+origin+'/api/ai/tools',
     '- OpenAPI：GET '+origin+'/api/ai/openapi.json','',
     '## 店铺（明确选择 shop_id）','```json',JSON.stringify(targets.map(t=>({shop_id:t.shopId,market:t.market})),null,2),'```','',
+    '## 导出时的实际授权范围','scope 数量不等于接口数量；最终以调用时 TikTok 权限检查为准。','```json',JSON.stringify(grants,null,2),'```','',
     '## 开始执行',
     '本文件是连接配置，不是业务操作授权指令。先 GET 工具发现地址，确认实际返回的工具；业务目标来自用户另外提出的任务。只有具备 HTTPS 请求执行能力的 AI 才能直接调用；本 Markdown 不会给纯聊天模型新增网络工具。',
     '调用方式：POST '+origin+'/api/ai/tools/{工具名}，Content-Type: application/json，正文为工具参数。公开模式不填写任何密码或 Token。',

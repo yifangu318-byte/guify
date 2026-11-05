@@ -11,7 +11,7 @@
   "keep_vars": true,
   // Dashboard owns runtime enable flags. keep_vars preserves the approved configuration.
   // Missing flags still fail closed in the request handlers.
-  "vars": {"MUSE_RELEASE":"2026-11-05-ai-r3"},
+  "vars": {"MUSE_RELEASE":"2026-11-05-ai-r4"},
   // D1 绑定：变量名 DB，数据库 muse-erp，后台已建好并绑定。
   // 数据库 ID 为 Cloudflare 后台的资源标识（非密钥），部署前请在后台核对一次；
   // Secret（TOKEN_ENCRYPTION_KEY、TIKTOK_APP_KEY、TIKTOK_APP_SECRET）只放

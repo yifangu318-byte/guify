@@ -8,7 +8,7 @@ import {AiError} from './contracts.js';
 export interface OfficialOptions {db:LifecycleDb;appKey:string;appSecret:string;secret:string;target:Target;writeEnabled:boolean;fetchImpl?:typeof fetch;now?:()=>number}
 const forbidden=/^(app_key|app_secret|access_token|refresh_token|sign|timestamp|shop_cipher|shop_id|authorization)$/i;
 // Fixed official host, versioned shop business modules only. No auth/token/relay URLs.
-const pathPattern=/^\/(product|order|fulfillment|logistics|return_refund|finance|promotion|customer_service|seller|supply_chain|fbt)\/20\d{4}(?:\/[A-Za-z0-9_-]+){1,12}$/;
+const pathPattern=/^\/(product|order|fulfillment|logistics|return_refund|finance|promotion|customer_service|seller|supply_chain|fbt|analytics|affiliate_seller)\/20\d{4}(?:\/[A-Za-z0-9_-]+){1,12}$/;
 function clean(value:unknown,secrets:string[],depth=0):unknown {
   if(depth>30)throw new AiError(502,'UPSTREAM_RESPONSE_INVALID');
   if(typeof value==='string'){let result=value;for(const secret of secrets)if(secret)result=result.split(secret).join('[redacted]');return result;}

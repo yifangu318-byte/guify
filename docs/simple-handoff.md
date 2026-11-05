@@ -34,4 +34,8 @@ HTTP 200 / code=0 不等于最终业务完成；返回 business_outcome=verify_r
 
 544 项隔离测试全部通过；TypeScript 编译、Worker 隔离构建和 HTTP 冒烟通过。实时执行器只用合成凭据和 Mock 网络，未修改真实商品、订单或库存，未逐项验证所有官方业务 API。源代码包含的通用执行器只能在官方实际授权及市场规则允许时成功。
 
-生产操作需要审核发布、schema 6 和开关。公开匿名真实写入会 materially expand access，应在动作前确认具体暴露范围；设置管理员新密码需用户本人输入和提交。不要将先前批准只读上线理解成这次公开写入已获批准。
+生产操作需要审核发布、schema 6 和开关。公开匿名真实写入会显著扩大访问权限，应在动作前确认具体暴露范围；设置管理员新密码需用户本人输入和提交。不要将先前批准只读上线理解成这次公开写入已获批准。
+
+2026-11-05 已只读核验 MY/Senalo 的授权记录：active，27 个 scope（scope 数量不是 API 数量），包括商品修改、履约、售后、联盟合作和经营分析。额外核实官方业务路径 analytics 与 affiliate_seller，执行器已增加这两个模块；生产启用仍待确认。官方下载 Markdown 会附当前已配置店铺的实际 scope 列表，不包括 Token 或卖家身份密文。
+
+参考：[经营分析](https://partner.tiktokshop.com/docv2/page/get-shop-performance-202609)、[联盟合作](https://partner.tiktokshop.com/docv2/page/search-target-collaborations-202508)、[达人市场](https://partner.tiktokshop.com/docv2/page/search-creators-in-creator-marketplace-202608)。这些是路径和权限文档核验，不是真实业务执行验收。

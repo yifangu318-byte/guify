@@ -25,3 +25,10 @@ test('official GET works without enabling writes, business rejection is explicit
  const f=await ready();let calls=0;const result=await invokeOfficial({shop_id:TARGET.shopId,path:'/order/202309/orders',method:'GET',query:{ids:'synthetic-order'}},{...f.options,writeEnabled:false,fetchImpl:async()=>{calls++;return json({status:'synthetic'},105005);}});
  assert.equal((result as any).error,true);assert.equal((result as any).upstream_code,105005);assert.equal(calls,1);assert.equal((await f.db.prepare('SELECT COUNT(*) AS n FROM api_operations').first()).n,0);
 });
+test('documented analytics and seller affiliate business modules use the same fixed host and authorization boundary',async()=>{
+ const f=await ready();let calls=0;
+ for(const path of ['/analytics/202609/shop/performance','/affiliate_seller/202508/target_collaborations']){
+  const result=await invokeOfficial({shop_id:TARGET.shopId,path,method:'GET'},{...f.options,writeEnabled:false,fetchImpl:async(input)=>{calls++;assert.equal(new URL(String(input)).origin,'https://open-api.tiktokglobalshop.com');return json({synthetic:true});}});
+  assert.equal((result as any).data.synthetic,true);
+ }assert.equal(calls,2);
+});

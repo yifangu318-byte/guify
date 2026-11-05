@@ -64,7 +64,14 @@ export function registerAi(app:FastifyInstance,runtime:TiktokRuntime){
   }));
   app.get('/api/ai/admin/handoff',safe(async(request,reply)=>{
     noQuery(request);const service=await admin(request);
-    const markdown=handoffMarkdown(new URL(read(runtime.getPublicUrl,'PUBLIC_URL')!).origin,service.options.targets,publicEnabled()&&enabled(),officialEnabled(),writeEnabled());
+    const grants=[];
+    for(const target of service.options.targets){
+      const row=await service.options.db.prepare('SELECT a.status,a.scopes_json FROM authorizations a JOIN authorized_shops s ON s.authorization_id=a.id WHERE s.app_hash=? AND a.app_hash=? AND s.tiktok_shop_id=? AND s.market=?')
+        .bind(service.appHash,service.appHash,target.shopId,target.market).first<{status:string;scopes_json:string}>();
+      const scopes:unknown=row?JSON.parse(row.scopes_json):[];
+      grants.push({shop_id:target.shopId,status:row?.status??'not_connected',scopes:Array.isArray(scopes)?scopes.filter((s):s is string=>typeof s==='string'&&/^[A-Za-z0-9_.]{1,128}$/.test(s)):[]});
+    }
+    const markdown=handoffMarkdown(new URL(read(runtime.getPublicUrl,'PUBLIC_URL')!).origin,service.options.targets,publicEnabled()&&enabled(),officialEnabled(),writeEnabled(),grants);
     return reply.type('text/markdown; charset=utf-8').header('Content-Disposition','attachment; filename="MUSE-AI.md"').send(markdown);
   }));
   app.get('/api/ai/admin/clients',safe(async request=>{noQuery(request);return (await admin(request)).list();}));
