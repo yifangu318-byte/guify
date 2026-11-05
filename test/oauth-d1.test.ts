@@ -41,7 +41,7 @@ test('multiple shops share only a verified subject; different subjects remain se
  const f=await fixture();assert.equal((await handleTikTokCallback(f.query,f.deps)).status,200);
  for(const target of [{...TARGET,shopId:'synthetic-shop-2'},{...TARGET,shopId:'synthetic-shop-3',subjectId:'synthetic-subject-3'}]){
  const state=issueState(SECRET,{now:()=>NOW,market:target.market}).state;await f.store.issue(state,BROWSER,'synthetic-app',target,NOW+600000,NOW);
- const {TOKEN,SHOP,json}=await import('./oauth-fixture.js');const deps={...f.deps,targets:[target],fetchImpl:async(url:any)=>String(url).includes('/token/')?json({...TOKEN,open_id:target.subjectId}):json({shops:[{...SHOP,id:target.shopId}]})};
+ const {TOKEN,SHOP,json}=await import('./oauth-fixture.js');const deps={...f.deps,targets:[target],fetchImpl:async(url:any)=>String(url).includes('/token/')?json({...TOKEN,open_id:target.subjectId}):json({shops:[...(target.subjectId===TARGET.subjectId?[SHOP]:[]),{...SHOP,id:target.shopId}]})};
  assert.equal((await handleTikTokCallback({...f.query,state},deps)).status,200);
  }
  const a=await f.store.authorization('synthetic-app',TARGET.shopId),b=await f.store.authorization('synthetic-app','synthetic-shop-2'),c=await f.store.authorization('synthetic-app','synthetic-shop-3');

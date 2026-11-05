@@ -62,10 +62,10 @@ export class D1OAuthStore {
       this.db.prepare('INSERT INTO oauth_audit(id,event,result,shop_id,created_at) VALUES (?,?,?,?,?)').bind(randomUUID(), 'oauth_callback', result, row.shop_id, now),
     ]);
   }
-  async complete(row: SessionRow, token: TokenExchangeResult, cipher: string, secret: string, required: string[], now: number) {
+  async complete(row: SessionRow, token: TokenExchangeResult, cipher: string, secret: string, required: string[], now: number,shopId=row.shop_id,otherShops:Array<{id:string;market:string;cipher:string}>=[]) {
     const subjectId = row.subject_id || token.subjectId;
-    const id = hash(`${row.app_hash}:${subjectId}`), internalId = hash(`${row.app_hash}:${row.shop_id}`);
-    const result = { error: false, shop_code: row.shop_id, market: row.market, expires_at: token.expiresAtMs };
+    const id = hash(`${row.app_hash}:${subjectId}`), internalId = hash(`${row.app_hash}:${shopId}`);
+    const result = { error: false, shop_code: shopId, market: row.market, expires_at: token.expiresAtMs };
     const scopes = token.scope.split(',');
     await this.db.batch([
       this.db.prepare(`INSERT INTO authorizations(id,app_hash,subject_id,access_enc,refresh_enc,access_expires_at,refresh_expires_at,scopes_json,required_scopes_json,status,updated_at,write_id)
@@ -78,12 +78,14 @@ export class D1OAuthStore {
       this.db.prepare(`INSERT INTO authorized_shops(id,app_hash,tiktok_shop_id,authorization_id,market,cipher,updated_at)
         SELECT ?,?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM authorizations WHERE id=? AND write_id=?)
         ON CONFLICT(id) DO UPDATE SET cipher=excluded.cipher,market=excluded.market,updated_at=excluded.updated_at WHERE authorized_shops.authorization_id=excluded.authorization_id`)
-        .bind(internalId, row.app_hash, row.shop_id, id, row.market, cipher, now, id, row.owner),
+        .bind(internalId, row.app_hash, shopId, id, row.market, cipher, now, id, row.owner),
+      ...otherShops.map(shop=>this.db.prepare(`UPDATE authorized_shops SET cipher=?,updated_at=? WHERE app_hash=? AND tiktok_shop_id=? AND market=? AND authorization_id=?
+        AND EXISTS(SELECT 1 FROM authorizations WHERE id=? AND write_id=?)`).bind(shop.cipher,now,row.app_hash,shop.id,shop.market,id,id,row.owner)),
       this.db.prepare(`UPDATE oauth_sessions SET status='succeeded',result_json=? WHERE state_hash=? AND owner=? AND status='processing'
         AND EXISTS(SELECT 1 FROM authorizations a JOIN authorized_shops s ON s.authorization_id=a.id WHERE a.id=? AND a.write_id=? AND s.id=?)`)
         .bind(JSON.stringify(result), row.state_hash, row.owner, id, row.owner, internalId),
       this.db.prepare(`INSERT INTO oauth_audit(id,event,result,shop_id,created_at) SELECT ?,'oauth_callback','succeeded',?,? WHERE EXISTS(SELECT 1 FROM oauth_sessions WHERE state_hash=? AND owner=? AND status='succeeded')`)
-        .bind(randomUUID(), row.shop_id, now, row.state_hash, row.owner),
+        .bind(randomUUID(), shopId, now, row.state_hash, row.owner),
     ]);
     const saved = await this.db.prepare("SELECT status FROM oauth_sessions WHERE state_hash=? AND owner=? AND status='succeeded'").bind(row.state_hash, row.owner).first();
     if (!saved) throw new Error('Authorization write conflict');

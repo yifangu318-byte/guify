@@ -9,6 +9,8 @@ const cases = [
   ['/web/orders', 200, 'text/html', body => assert.match(body, /订单列表/)],
   ['/api/shops/demo/orders', 401, 'application/json'],
   ['/developers', 200, 'text/html', body => assert.match(body, /下载 AI 接入包/)],
+  ['/connect', 200, 'text/html', body => assert.match(body, /要连接的国家/)],
+  ['/api/tiktok/enroll?market=PH', 401, 'application/json'],
   ['/api/ai/openapi.json', 200, 'application/json', body => assert.equal(Object.keys(JSON.parse(body).paths).length, 8)],
   ['/api/ai/shops/synthetic/products/p1', 401, 'application/json'],
   ['/api/ai/shops/synthetic/orders/o1/status', 401, 'application/json'],

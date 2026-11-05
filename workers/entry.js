@@ -47,6 +47,7 @@ const app = buildApp(loadConfig(), undefined, {}, {}, {
     getOfficialEnabled: () => env.MUSE_TIKTOK_API_ENABLED,
     getWriteEnabled: () => env.MUSE_TIKTOK_WRITE_ENABLED,
     getAdminPassword: () => env.MUSE_ADMIN_PASSWORD,
+    getMultiShopEnabled: () => env.MUSE_MULTI_SHOP_ENABLED,
     getProductLimit: () => env.MUSE_LIVE_PRODUCT_LIMIT,
     getPublicUrl: () => env.PUBLIC_URL,
     getRelayAllowedOrigin: () => env.RELAY_ALLOWED_ORIGIN,

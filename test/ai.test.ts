@@ -2,7 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import Fastify from 'fastify';
 import {Script} from 'node:vm';
-import {fixture,NOW,TARGET} from './oauth-fixture.js';
+import {fixture,NOW,TARGET,SECRET} from './oauth-fixture.js';
 import {handleTikTokCallback} from '../src/tiktok/oauth.js';
 import {hash} from '../src/tiktok/vault.js';
 import {registerOAuth} from '../src/tiktok/routes.js';
@@ -190,10 +190,10 @@ test('public mode explicitly removes AI credentials, expiry and per-client rate 
  assert.equal((await f.db.prepare('SELECT COUNT(*) AS n FROM ai_api_clients').first()).n,0);
  assert.equal((await f.app.inject({url:'/api/ai/shops',headers:{host,origin:'https://evil.test'}})).statusCode,403);
 });
-test('a configured eight-character management password works only for AI management; handoff is a complete credential-free Markdown attachment',async t=>{
- const f=await setup({getAdminPassword:()=> 'Small123',getAiPublicEnabled:()=> 'true'});t.after(()=>f.app.close());const headers={host,authorization:'Bearer Small123'};
+test('a configured eight-character administrator password works for management and live data; handoff contains no credential',async t=>{
+ const f=await setup({getAdminPassword:()=> 'Small123',getAiPublicEnabled:()=> 'true',getSecret:()=>SECRET,getAppSecret:()=> 'synthetic-app-secret'});t.after(()=>f.app.close());const headers={host,authorization:'Bearer Small123'};
  const status=await f.app.inject({url:'/api/ai/admin/status',headers});assert.equal(status.statusCode,200);assert.equal(status.json().public_enabled,true);
  const doc=await f.app.inject({url:'/api/ai/admin/handoff',headers});assert.equal(doc.statusCode,200);assert.ok(String(doc.headers['content-disposition']).includes('MUSE-AI.md'));assert.ok(doc.body.includes(TARGET.shopId));assert.ok(doc.body.includes('get_product_detail'));assert.ok(doc.body.includes('公开免认证'));assert.ok(!doc.body.includes(admin));assert.ok(!doc.body.includes('Small123'));assert.ok(!doc.body.includes('synthetic-app-secret'));
- assert.equal((await f.app.inject({url:'/api/live/shops',headers})).statusCode,401);
+ assert.equal((await f.app.inject({url:'/api/live/shops',headers})).statusCode,200);
  const disabled=handoffMarkdown('https://'+host,[TARGET],false,false,false);assert.ok(disabled.includes('尚未开启公开免认证'));assert.ok(disabled.includes('未开启，不能声称已修改店铺'));
 });

@@ -2,6 +2,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { verifyState } from './crypto.js';
 import { createDefaultExchange, fetchAuthorizedShops, selectAuthorizedShop, TokenExchangeError, AuthorizedShopsError } from './callback.js';
 import { D1OAuthStore, hash, type LifecycleDb, type Target, type SessionRow } from './vault.js';
+import {enrollmentSession,enrollmentPrefix} from './targets.js';
 
 export const requiredScopes = ['seller.authorization.info'];
 export function parseTargets(value: string | undefined): Target[] {
@@ -31,6 +32,7 @@ export interface CallbackDeps {
   secret?: string | undefined; appKey?: string | undefined; appSecret?: string | undefined;
   db?: LifecycleDb | undefined; browser?: string | undefined; targets?: Target[] | undefined;
   enabled?: boolean | undefined; environment?: string | undefined;
+  allowEnrollment?:boolean | undefined;
   relayUrl?: string | undefined; relaySecret?: string | undefined; relayAllowedOrigin?: string | undefined;
   fetchImpl?: typeof fetch | undefined; now?: (() => number) | undefined;
 }
@@ -52,7 +54,7 @@ export async function handleTikTokCallback(query: { code?: unknown; state?: unkn
   try {
     await store.ready();
     const previous = await store.session(state, deps.browser, deps.appKey, now);
-    if (!previous || !deps.targets?.some(t => t.shopId === previous.shop_id && t.market === previous.market && t.subjectId === previous.subject_id))
+    if (!previous || !(enrollmentSession(previous,deps.allowEnrollment===true)||deps.targets?.some(t => t.shopId === previous.shop_id && t.market === previous.market && t.subjectId === previous.subject_id)))
       return failure(400, 'STATE_UNVERIFIED', 'State verification failed');
     if (previous.status !== 'pending') {
       if (previous.status === 'succeeded' && previous.code_hash === hash(code) && previous.result_json)
@@ -66,17 +68,37 @@ export async function handleTikTokCallback(query: { code?: unknown; state?: unkn
     // Resolve global fetch at request time. Never capture the Worker startup fetch binding.
     const fetchImpl = deps.fetchImpl ?? globalThis.fetch;
     const exchanged = await createDefaultExchange(fetchImpl)({ code, appKey: deps.appKey, appSecret: deps.appSecret, nowMs: now });
+    const enrolling=enrollmentSession(claimed,deps.allowEnrollment===true);
     const existing = await store.authorization(deps.appKey,claimed.shop_id);
-    if ((claimed.subject_id && exchanged.subjectId !== claimed.subject_id)
+    if ((!enrolling&&claimed.subject_id && exchanged.subjectId !== claimed.subject_id)
       || (existing && existing.subject_id !== exchanged.subjectId) || !requiredScopes.every(s => exchanged.scope.split(',').includes(s)))
       throw new TokenExchangeError(200, 'identity_or_scope_mismatch');
     const shops = await fetchAuthorizedShops({ accessToken: exchanged.accessToken, appKey: deps.appKey, appSecret: deps.appSecret,
       nowMs: (deps.now ?? Date.now)(), fetchImpl, relayUrl: deps.relayUrl, relaySecret: deps.relaySecret, relayAllowedOrigin: deps.relayAllowedOrigin });
-    const selected = selectAuthorizedShop(shops, claimed.market, claimed.shop_id);
+    const expected=enrolling?(claimed.subject_id.slice(enrollmentPrefix.length)||undefined):claimed.shop_id;
+    const selected = selectAuthorizedShop(shops, claimed.market, expected);
+    if(enrolling&&!selected){
+      const matches=shops.filter(s=>s.region===claimed!.market);
+      const code=matches.length>1?'SHOP_SELECTION_REQUIRED':'SHOP_MARKET_MISMATCH';
+      await store.fail(claimed,(deps.now??Date.now)(),code.toLowerCase());
+      return failure(409,code,matches.length>1?'该国家返回多家店铺，请填写目标 Shop ID 后重新授权。':'本次授权未返回所选国家的店铺，请切换到对应国家的卖家账号后重新授权。');
+    }
     if (!selected?.cipher) throw new AuthorizedShopsError(200, 'shops_no_match');
+    const mapped=await store.authorization(deps.appKey,selected.id);
+    if(mapped&&mapped.subject_id!==exchanged.subjectId)throw new TokenExchangeError(200,'identity_or_scope_mismatch');
+    const configured=deps.targets?.find(t=>t.shopId===selected.id);
+    if(configured&&(configured.market!==claimed.market||configured.subjectId&&configured.subjectId!==exchanged.subjectId))throw new TokenExchangeError(200,'identity_or_scope_mismatch');
+    // A new token for the same seller must still authorize every previously connected shop before replacing the shared vault entry.
+    const linked=await deps.db.prepare(`SELECT s.tiktok_shop_id,s.market FROM authorized_shops s JOIN authorizations a ON a.id=s.authorization_id
+      WHERE s.app_hash=? AND a.app_hash=? AND a.subject_id=?`).bind(hash(deps.appKey),hash(deps.appKey),exchanged.subjectId).all<{tiktok_shop_id:string;market:string}>();
+    const preserved=[];
+    for(const previous of linked.results){const shop=selectAuthorizedShop(shops,previous.market,previous.tiktok_shop_id);
+      if(!shop?.cipher){await store.fail(claimed,(deps.now??Date.now)(),'existing_shops_missing');return failure(409,'EXISTING_SHOPS_MISSING','新授权未覆盖该卖家已连接的全部店铺，已保留原授权。请在平台选择包含原店铺的授权范围。');}
+      preserved.push({id:shop.id,market:previous.market,cipher:shop.cipher});
+    }
     const finished = (deps.now ?? Date.now)();
     if (finished >= claimed.expires_at || exchanged.expiresAtMs <= finished) throw new TokenExchangeError(200, 'expired');
-    const body = await store.complete(claimed, exchanged, selected.cipher, deps.secret, requiredScopes, finished);
+    const body = await store.complete(enrolling?{...claimed,subject_id:''}:claimed, exchanged, selected.cipher, deps.secret, requiredScopes, finished,selected.id,preserved);
     return { status: 200, body, logEvent: 'success' };
   } catch (error) {
     try { await store.fail(claimed, (deps.now ?? Date.now)()); } catch { /* Consumed claims are never released or retried after an uncertain write. */ }

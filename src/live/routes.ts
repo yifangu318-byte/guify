@@ -4,11 +4,12 @@ import {authenticated,parseTargets} from '../tiktok/oauth.js';
 import {LiveService,type LiveConfig} from './service.js';
 import {LiveError,parseWindow,record,limitDiagnostic,type Resource} from './models.js';
 import {registerLivePage} from './page.js';
+import {resolveTargets} from '../tiktok/targets.js';
 export function registerLive(app:FastifyInstance,runtime:TiktokRuntime){
   registerLivePage(app);
   const read=(getter:(()=>string|undefined)|undefined,name:string)=>getter?getter():process.env[name];
-  const config=(request:FastifyRequest)=>{
-    if(!authenticated(request.headers.authorization,read(runtime.getAdminToken,'MUSE_OAUTH_ADMIN_TOKEN')))throw new LiveError(401,'UNAUTHORIZED');
+  const config=async(request:FastifyRequest)=>{
+    if(!authenticated(request.headers.authorization,read(runtime.getAdminToken,'MUSE_OAUTH_ADMIN_TOKEN'))&&!authenticated(request.headers.authorization,read(runtime.getAdminPassword,'MUSE_ADMIN_PASSWORD'),8))throw new LiveError(401,'UNAUTHORIZED');
     let origin:URL;
     try{origin=new URL(read(runtime.getPublicUrl,'PUBLIC_URL')??'');if(origin.protocol!=='https:'||origin.pathname!=='/'||origin.username||origin.password||origin.search||origin.hash)throw new Error();}
     catch{throw new LiveError(503,'LIVE_UNAVAILABLE');}
@@ -17,7 +18,7 @@ export function registerLive(app:FastifyInstance,runtime:TiktokRuntime){
     const enabled=read(runtime.getLiveEnabled,'MUSE_LIVE_READ_ENABLED')==='true'&&['test','staging','production'].includes(environment??'');
     const appKey=read(runtime.getAppKey,'TIKTOK_APP_KEY'),appSecret=read(runtime.getAppSecret,'TIKTOK_APP_SECRET'),secret=read(runtime.getSecret,'TOKEN_ENCRYPTION_KEY'),db=runtime.getDb?.();
     if(!appKey||!appSecret||!secret||!/^[a-fA-F0-9]{64}$/.test(secret)||!db)throw new LiveError(503,'LIVE_UNAVAILABLE');
-    const targets=parseTargets(read(runtime.getTargets,'TIKTOK_SHOP_TARGETS'));
+    const targets=await resolveTargets(parseTargets(read(runtime.getTargets,'TIKTOK_SHOP_TARGETS')),db,appKey,read(runtime.getMultiShopEnabled,'MUSE_MULTI_SHOP_ENABLED')==='true');
     const rawLimit=read(runtime.getProductLimit,'MUSE_LIVE_PRODUCT_LIMIT');
     if(rawLimit!==undefined&&!['1000','2000'].includes(rawLimit))throw new LiveError(503,'LIVE_UNAVAILABLE');
     const productLimit=rawLimit==='2000'?2000:1000;
@@ -35,14 +36,14 @@ export function registerLive(app:FastifyInstance,runtime:TiktokRuntime){
   };
   app.get('/api/live/shops',protect(async request=>{
     if(Object.keys(request.query as object).length)throw new LiveError(400,'INVALID_REQUEST');
-    const {enabled,targets,service}=config(request);let database=false;try{await service.ready();database=true;}catch{}
+    const {enabled,targets,service}=await config(request);let database=false;try{await service.ready();database=true;}catch{}
     const shops=[];
     for(const target of targets){const permissions={products:false,orders:false};for(const resource of ['products','orders'] as const){try{await service.scope(target.shopId,target.market,resource);permissions[resource]=true;}catch{}}
       shops.push({shop_id:target.shopId,market:target.market,permissions});}
     return {source:'tiktok_api',enabled,database,limits:{products:service.config.productLimit??1000,orders:1000},shops};
   }));
-  const scoped=(request:FastifyRequest)=>{
-    const {service,targets,enabled}=config(request);if(!enabled)throw new LiveError(503,'LIVE_DISABLED');
+  const scoped=async(request:FastifyRequest)=>{
+    const {service,targets,enabled}=await config(request);if(!enabled)throw new LiveError(503,'LIVE_DISABLED');
     const {shop_id,resource}=request.params as {shop_id:string;resource:Resource};
     const query=request.query as Record<string,unknown>;
     if(!['products','orders'].includes(resource)||Object.keys(query).some(k=>resource!=='products'||request.method!=='GET'||k!=='page'))throw new LiveError(400,'INVALID_REQUEST');
@@ -52,10 +53,10 @@ export function registerLive(app:FastifyInstance,runtime:TiktokRuntime){
     return {service,target,resource,page};
   };
   app.get('/api/live/shops/:shop_id/:resource',protect(async request=>{
-    const {service,target,resource,page}=scoped(request);return service.snapshot(target.shopId,target.market,resource,page);
+    const {service,target,resource,page}=await scoped(request);return service.snapshot(target.shopId,target.market,resource,page);
   }));
   app.post('/api/live/shops/:shop_id/:resource/sync',{bodyLimit:1024},protect(async request=>{
-    const {service,target,resource}=scoped(request);
+    const {service,target,resource}=await scoped(request);
     if(!record(request.body))throw new LiveError(400,'INVALID_REQUEST');
     if(resource==='products'&&Object.keys(request.body).length)throw new LiveError(400,'INVALID_REQUEST');
     const window=resource==='orders'?parseWindow(request.body,service.now()):undefined;

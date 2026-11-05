@@ -8,6 +8,7 @@ const html=`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta 
 export const aiPageScript=`(() => {
 'use strict';const el=id=>document.getElementById(id);let generation=0,busy=false,ready=false;
 const messages={UNAUTHORIZED:'密码不正确。',AI_MIGRATION_REQUIRED:'接入服务尚未就绪。',AI_UNAVAILABLE:'服务暂时不可用，请稍后再试。'};
+if(['MY','PH','SG','TH','VN'].includes(new URLSearchParams(location.search).get('connected'))){el('message').textContent='授权流程已返回，请登录确认已连接店铺并下载更新的接入包。';history.replaceState(null,'','/developers');}
 function reset(){generation++;ready=false;el('admin').value='';el('workspace').hidden=true;el('access').hidden=false;el('summary').textContent='';el('mode').textContent='';el('message').textContent='';}
 function lock(value){busy=value;el('login').disabled=value;el('download').disabled=value||!ready;}
 async function request(path,markdown=false){const response=await fetch(path,{headers:{Authorization:'Bearer '+el('admin').value,Accept:markdown?'text/markdown':'application/json'},cache:'no-store',credentials:'same-origin',redirect:'error',signal:AbortSignal.timeout(15000)});if(!response.ok){const data=await response.json();throw new Error(messages[data.code]||'请求未完成，请稍后再试。');}return markdown?response.text():response.json();}
