@@ -80,6 +80,14 @@ export function registerAi(app:FastifyInstance,runtime:TiktokRuntime){
     const {service,client}=await agent(request);noQuery(request);return invoke(service,client,(request.params as {tool:unknown}).tool,request.body);
   }));
   app.get('/api/ai/shops',safe(async request=>{const {service,client}=await agent(request);noQuery(request);return invoke(service,client,'list_shops',{});}));
+  for(const [path,tool] of [
+    ['/api/ai/shops/:shop_id/products/:product_id','get_product_detail'],
+    ['/api/ai/shops/:shop_id/products/:product_id/skus','get_product_skus'],
+    ['/api/ai/shops/:shop_id/orders/:order_id','get_order_detail'],
+    ['/api/ai/shops/:shop_id/orders/:order_id/status','get_order_status'],
+  ] as const)app.get(path,safe(async request=>{
+    const {service,client}=await agent(request);noQuery(request);return invoke(service,client,tool,request.params);
+  }));
   app.get('/api/ai/shops/:shop_id/:resource',safe(async request=>{
     const {service,client}=await agent(request),{shop_id,resource}=request.params as {shop_id:string;resource:string},query=request.query as Record<string,unknown>;
     const tool=({products:'get_products',orders:'get_orders',inventory:'get_inventory'} as Record<string,AiTool>)[resource];

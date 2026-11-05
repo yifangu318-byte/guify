@@ -3,7 +3,7 @@ import {D1OAuthStore,hash,type LifecycleDb} from '../tiktok/vault.js';
 import {getValidAccessToken} from '../tiktok/refresh.js';
 import {readSnapshot,readPages} from './client.js';
 import {ProductSnapshotBuilder,snapshotPage} from './snapshot.js';
-import {LiveError,limitDiagnostic,type Resource,type Window,type LiveProduct} from './models.js';
+import {LiveError,limitDiagnostic,record,type Resource,type Window,type LiveProduct} from './models.js';
 export interface LiveConfig {db:LifecycleDb;appKey:string;appSecret:string;secret:string;productLimit?:1000|2000;fetchImpl?:typeof fetch;now?:()=>number;sleep?:(ms:number)=>Promise<void>}
 interface ScopeRow {id:string;version:number;market:string;cipher:string;scopes_json:string;status:string;access_expires_at:number;refresh_expires_at:number;key_version:string}
 interface SnapshotRow {snapshot_json:string|null;range_start:number|null;range_end:number|null;last_success_at:number|null;last_attempt_at:number;last_error:string|null;upstream_code:number|null;lease_until:number|null}
@@ -24,16 +24,40 @@ export class LiveService {
     if(!Array.isArray(granted)||!granted.includes(scopes[resource]))throw new LiveError(403,'SCOPE_REQUIRED');
     return row;
   }
-  async snapshot(shopId:string,market:string,resource:Resource,page=1){
+  private async snapshotRow(shopId:string,market:string,resource:Resource){
     await this.scope(shopId,market,resource);await this.ready();
-    const row=await this.config.db.prepare('SELECT snapshot_json,range_start,range_end,last_success_at,last_attempt_at,last_error,upstream_code,lease_until FROM live_snapshots WHERE app_hash=? AND shop_id=? AND resource=?')
+    return this.config.db.prepare('SELECT snapshot_json,range_start,range_end,last_success_at,last_attempt_at,last_error,upstream_code,lease_until FROM live_snapshots WHERE app_hash=? AND shop_id=? AND resource=?')
       .bind(this.appHash,shopId,resource).first<SnapshotRow>();
-    const {data,pagination}=snapshotPage(row?.snapshot_json??null,resource,page);
+  }
+  private metadata(row:SnapshotRow|null,shopId:string,market:string,resource:Resource){
     const parts=row?.last_error?.split('|')??[];
     const limit=parts.length===4?limitDiagnostic({kind:parts[1],limit:Number(parts[2]),actual:Number(parts[3])}):null;
     return {source:'tiktok_api' as const,shop_id:shopId,market,resource,synced_at:row?.last_success_at??null,last_attempt_at:row?.last_attempt_at??null,
       last_error:parts[0]??null,limit,upstream_code:row?.upstream_code??null,syncing:!!row?.lease_until&&row.lease_until>this.now(),
-      window:resource==='orders'&&row?.range_start!==null&&row?.range_start!==undefined?{start_at:row.range_start,end_at:row.range_end}:null,data,pagination};
+      window:resource==='orders'&&row?.range_start!==null&&row?.range_start!==undefined?{start_at:row.range_start,end_at:row.range_end}:null};
+  }
+  async snapshot(shopId:string,market:string,resource:Resource,page=1){
+    const row=await this.snapshotRow(shopId,market,resource);
+    return {...this.metadata(row,shopId,market,resource),...snapshotPage(row?.snapshot_json??null,resource,page)};
+  }
+  async lookup(shopId:string,market:string,resource:Resource,objectId:string){
+    // Read one immutable stored revision. A concurrent sync cannot mix pages from different revisions.
+    const row=await this.snapshotRow(shopId,market,resource),raw=row?.snapshot_json??null;
+    const metadata=this.metadata(row,shopId,market,resource),first=snapshotPage(raw,resource);
+    if(first.data===null)return {...metadata,data:null,lookup_status:'snapshot_missing' as const,coverage:null};
+    const pages=first.pagination?.page_count??1;let inspected=0,bytes=0,match:Record<string,unknown>|undefined;
+    const deadline=performance.now()+3000;
+    for(let page=1;page<=pages;page++){
+      const result=page===1?first:snapshotPage(raw,resource,page);
+      bytes+=Buffer.byteLength(JSON.stringify(result.data),'utf8');
+      if(bytes>8_000_000||performance.now()>deadline)throw new LiveError(503,'LOOKUP_LIMIT_EXCEEDED');
+      inspected++;match=result.data?.find(item=>record(item)&&item[resource==='products'?'product_id':'order_id']===objectId) as Record<string,unknown>|undefined;
+      if(match)break;
+    }
+    // Authorization may be withdrawn while processing a large compressed snapshot.
+    await this.scope(shopId,market,resource);
+    return {...metadata,data:match??null,lookup_status:match?'found' as const:'not_in_snapshot' as const,
+      coverage:{searched_pages:inspected,total_pages:pages,total_count:first.pagination?.total_count??first.data.length,matched_page:match?inspected:null,complete:inspected===pages}};
   }
   async sync(shopId:string,market:string,resource:Resource,window?:Window){
     await this.scope(shopId,market,resource);await this.ready();const owner=randomUUID(),started=this.now();

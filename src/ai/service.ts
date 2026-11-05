@@ -2,7 +2,7 @@ import {randomUUID} from 'node:crypto';
 import {hash,type LifecycleDb,type Target} from '../tiktok/vault.js';
 import {LiveService} from '../live/service.js';
 import {record,type LiveProduct} from '../live/models.js';
-import {AiError,isTool,validToken,type AiTool} from './contracts.js';
+import {AiError,isTool,validToken,toolFields,type AiTool} from './contracts.js';
 
 export interface AiClientRow {
   id:string; app_hash:string; name:string; token_hash:string; shop_ids_json:string; tools_json:string;
@@ -93,7 +93,7 @@ export class AiService {
         const permissions={products:false,orders:false,inventory:false};
         for(const resource of ['products','orders'] as const){
           try{await this.options.live.scope(target.shopId,target.market,resource);
-            permissions[resource]=this.allowedTools(client).includes(resource==='products'?'get_products':'get_orders');
+            permissions[resource]=this.allowedTools(client).some(t=>(resource==='products'?['get_products','get_product_detail','get_product_skus']:['get_orders','get_order_detail','get_order_status']).includes(t));
             if(resource==='products')permissions.inventory=this.allowedTools(client).includes('get_inventory');
           }catch{/* A revoked or insufficient TikTok scope never grants read access. */}
         }
@@ -102,10 +102,18 @@ export class AiService {
       return {source:'tiktok_api',mode:'cached_snapshot',shops};
     }
     const {shop_id,page}=args;
-    if(Object.keys(args).some(k=>!['shop_id',...(tool==='get_orders'?[]:['page'])].includes(k))||!validId(shop_id)
+    if(Object.keys(args).some(k=>!toolFields[tool].includes(k))||toolFields[tool].some(k=>k!=='page'&&!validId(args[k]))||!validId(shop_id)
       ||page!==undefined&&(typeof page!=='number'||!Number.isInteger(page)||page<1||page>20))throw new AiError(400,'INVALID_REQUEST');
     const target=this.options.targets.find(t=>t.shopId===shop_id&&strings(client.shop_ids_json).includes(t.shopId));
     if(!target)throw new AiError(403,'SHOP_FORBIDDEN');
+    const objectId=args.product_id??args.order_id;
+    if(typeof objectId==='string'){
+      const result=await this.options.live.lookup(target.shopId,target.market,args.order_id===undefined?'products':'orders',objectId);
+      let data=result.data;
+      if(data&&tool==='get_product_skus')data={product_id:data.product_id,skus:data.skus};
+      if(data&&tool==='get_order_status')data={order_id:data.order_id,status:data.status,created_at:data.created_at,updated_at:data.updated_at};
+      return {...result,data,mode:'cached_snapshot',resource:tool.slice(4)};
+    }
     const snapshot=await this.options.live.snapshot(target.shopId,target.market,tool==='get_orders'?'orders':'products',page===undefined?1:page as number);
     if(tool!=='get_inventory')return {...snapshot,mode:'cached_snapshot'};
     return {...snapshot,mode:'cached_snapshot',resource:'inventory',pagination_unit:'products',
