@@ -43,6 +43,8 @@ export function buildApp(config: Config, destination?: NodeJS.WritableStream, ga
     return { status: 'ok', service: 'muse-erp', version: '0.1.0', database: { status: databaseStatus }, ...(release ? { release } : {}) };
   });
   app.get('/', async (_request,reply) => {
+    const ai=(runtimeOptions.tiktok?.getAiEnabled?runtimeOptions.tiktok.getAiEnabled():process.env.MUSE_AI_API_ENABLED)==='true';
+    if(ai)return reply.code(302).header('Cache-Control','no-store').header('Location','/developers').send();
     const live=(runtimeOptions.tiktok?.getLiveEnabled?runtimeOptions.tiktok.getLiveEnabled():process.env.MUSE_LIVE_READ_ENABLED)==='true';
     return reply.code(302).header('Cache-Control','no-store').header('Location',live?'/live':'/web/').send();
   });

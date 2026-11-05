@@ -18,8 +18,8 @@ export function parseTargets(value: string | undefined): Target[] {
     ids.add(shopId); return { shopId, market, subjectId: subjectId ?? '' };
   });
 }
-export function authenticated(header: unknown, token: string | undefined): boolean {
-  return typeof header === 'string' && !!token && token.length >= 32 && !/\s/.test(token)
+export function authenticated(header: unknown, token: string | undefined,minimum=32): boolean {
+  return typeof header === 'string' && !!token && token.length >= minimum && !/\s/.test(token)
     && timingSafeEqual(Buffer.from(hash(header)), Buffer.from(hash(`Bearer ${token}`)));
 }
 export function browserCookie(raw: string | undefined): string | undefined {

@@ -3,7 +3,7 @@ import {createAiHttpClient} from './ai/client.js';
 import {createLiveMcpServer} from './ai/mcp.js';
 async function main(){
   if(process.argv.length!==2)throw new Error('Arguments are not supported; configure environment variables');
-  const client=createAiHttpClient(process.env.MUSE_ERP_URL,process.env.MUSE_AI_TOKEN);
+  const client=createAiHttpClient(process.env.MUSE_ERP_URL,process.env.MUSE_AI_TOKEN,globalThis.fetch,process.env.MUSE_AI_PUBLIC==='true');
   const server=createLiveMcpServer(client);
   const close=()=>{void server.close().catch(()=>{});};
   for(const signal of ['SIGINT','SIGTERM'] as const)process.once(signal,close);process.stdin.once('end',close);

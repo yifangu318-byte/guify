@@ -8,11 +8,19 @@ import {AiService,type AiClientRow} from './service.js';
 import {AiError,aiTools,instructions,isTool,type AiTool} from './contracts.js';
 import {aiOpenApi} from './openapi.js';
 import {registerAiPage} from './page.js';
+import {invokeOfficial} from './official.js';
+import {handoffMarkdown} from './handoff.js';
 
 export function registerAi(app:FastifyInstance,runtime:TiktokRuntime){
   registerAiPage(app);
   const read=(getter:(()=>string|undefined)|undefined,name:string)=>getter?getter():process.env[name];
   const enabled=()=>read(runtime.getAiEnabled,'MUSE_AI_API_ENABLED')==='true';
+  const publicEnabled=()=>read(runtime.getAiPublicEnabled,'MUSE_AI_PUBLIC_ENABLED')==='true';
+  const officialEnabled=()=>read(runtime.getOfficialEnabled,'MUSE_TIKTOK_API_ENABLED')==='true';
+  const writeEnabled=()=>read(runtime.getWriteEnabled,'MUSE_TIKTOK_WRITE_ENABLED')==='true';
+  const availableTools=()=>aiTools.filter(t=>t.name!=='tiktok_request'||officialEnabled());
+  const isAdmin=(request:FastifyRequest)=>authenticated(request.headers.authorization,read(runtime.getAdminToken,'MUSE_OAUTH_ADMIN_TOKEN'))
+    ||authenticated(request.headers.authorization,read(runtime.getAdminPassword,'MUSE_ADMIN_PASSWORD'),8);
   const config=(request:FastifyRequest)=>{
     let origin:URL;
     try{origin=new URL(read(runtime.getPublicUrl,'PUBLIC_URL')??'');if(origin.protocol!=='https:'||origin.pathname!=='/'||origin.search||origin.hash||origin.username||origin.password)throw new Error();}
@@ -24,7 +32,11 @@ export function registerAi(app:FastifyInstance,runtime:TiktokRuntime){
     const targets=parseTargets(read(runtime.getTargets,'TIKTOK_SHOP_TARGETS')),now=runtime.now??Date.now;
     // Reading cached snapshots needs neither app secret nor encryption key and never refreshes tokens.
     const live=new LiveService({db,appKey,appSecret:'',secret:'',now,fetchImpl:async()=>{throw new Error('AI reads cannot contact upstream');}});
-    return new AiService({db,appKey,targets,live,now});
+    return new AiService({db,appKey,targets,live,now,...(officialEnabled()?{official:async(target,args)=>{
+      const appSecret=read(runtime.getAppSecret,'TIKTOK_APP_SECRET'),secret=read(runtime.getSecret,'TOKEN_ENCRYPTION_KEY');
+      if(!appSecret||!secret)throw new AiError(503,'OFFICIAL_API_UNAVAILABLE');
+      return invokeOfficial(args,{db,appKey,appSecret,secret,target,writeEnabled:writeEnabled(),now,...(runtime.fetchImpl?{fetchImpl:runtime.fetchImpl}:{})});
+    }}:{})});
   };
   const safe=(handler:(request:FastifyRequest,reply:FastifyReply)=>Promise<unknown>)=>async(request:FastifyRequest,reply:FastifyReply)=>{
     const requestId=randomUUID();reply.header('Cache-Control','no-store').header('Referrer-Policy','no-referrer').header('X-Content-Type-Options','nosniff').header('X-Request-ID',requestId);
@@ -36,17 +48,24 @@ export function registerAi(app:FastifyInstance,runtime:TiktokRuntime){
     }
   };
   const admin=async(request:FastifyRequest)=>{
-    if(!authenticated(request.headers.authorization,read(runtime.getAdminToken,'MUSE_OAUTH_ADMIN_TOKEN')))throw new AiError(401,'UNAUTHORIZED');
+    if(!isAdmin(request))throw new AiError(401,'UNAUTHORIZED');
     const service=config(request);await service.ready();return service;
   };
   const noQuery=(request:FastifyRequest)=>{if(Object.keys(request.query as object).length)throw new AiError(400,'INVALID_REQUEST');};
-  app.get('/api/ai/openapi.json',async(_request,reply)=>reply.header('Cache-Control','no-store').send(aiOpenApi));
+  app.get('/api/ai/openapi.json',async(_request,reply)=>reply.header('Cache-Control','no-store').send({...aiOpenApi,
+    security:publicEnabled()?[]:aiOpenApi.security,
+    paths:Object.fromEntries(Object.entries(aiOpenApi.paths).filter(([path])=>availableTools().some(t=>path==='/api/ai/tools/'+t.name)))}));
   app.get('/api/ai/admin/status',safe(async request=>{
     noQuery(request);
-    if(!authenticated(request.headers.authorization,read(runtime.getAdminToken,'MUSE_OAUTH_ADMIN_TOKEN')))throw new AiError(401,'UNAUTHORIZED');
+    if(!isAdmin(request))throw new AiError(401,'UNAUTHORIZED');
     const service=config(request);let database=false;try{await service.ready();database=true;}catch{}
-    return {enabled:enabled(),live_enabled:read(runtime.getLiveEnabled,'MUSE_LIVE_READ_ENABLED')==='true',database,
-      shops:service.options.targets.map(t=>({shop_id:t.shopId,market:t.market})),tools:aiTools,instructions};
+    return {enabled:enabled(),public_enabled:publicEnabled(),official_enabled:officialEnabled(),write_enabled:writeEnabled(),live_enabled:read(runtime.getLiveEnabled,'MUSE_LIVE_READ_ENABLED')==='true',database,
+      shops:service.options.targets.map(t=>({shop_id:t.shopId,market:t.market})),tools:availableTools(),instructions};
+  }));
+  app.get('/api/ai/admin/handoff',safe(async(request,reply)=>{
+    noQuery(request);const service=await admin(request);
+    const markdown=handoffMarkdown(new URL(read(runtime.getPublicUrl,'PUBLIC_URL')!).origin,service.options.targets,publicEnabled()&&enabled(),officialEnabled(),writeEnabled());
+    return reply.type('text/markdown; charset=utf-8').header('Content-Disposition','attachment; filename="MUSE-AI.md"').send(markdown);
   }));
   app.get('/api/ai/admin/clients',safe(async request=>{noQuery(request);return (await admin(request)).list();}));
   app.post('/api/ai/admin/clients',{bodyLimit:8192},safe(async(request,reply)=>{
@@ -60,6 +79,14 @@ export function registerAi(app:FastifyInstance,runtime:TiktokRuntime){
     return service.revoke((request.params as {id:unknown}).id);
   }));
   const agent=async(request:FastifyRequest)=>{
+    if(publicEnabled()&&request.headers.authorization===undefined){
+      const service=config(request);
+      if(!enabled()||read(runtime.getLiveEnabled,'MUSE_LIVE_READ_ENABLED')!=='true')throw new AiError(503,'AI_DISABLED');
+      await service.ready();const now=(runtime.now??Date.now)();
+      const client:AiClientRow={id:'anonymous-public',app_hash:service.appHash,name:'Public',token_hash:'',shop_ids_json:JSON.stringify(service.options.targets.map(t=>t.shopId)),
+        tools_json:JSON.stringify(availableTools().map(t=>t.name)),created_at:now,expires_at:Number.MAX_SAFE_INTEGER,revoked_at:null,rate_limit:0,rate_window:0,rate_count:0};
+      if(!service.options.targets.length)throw new AiError(503,'SHOP_AUTHORIZATION_REQUIRED');return {service,client};
+    }
     if(typeof request.headers.authorization!=='string'||!/^Bearer [A-Za-z0-9_-]{32,256}$/.test(request.headers.authorization))throw new AiError(401,'UNAUTHORIZED');
     const service=config(request);
     if(!enabled()||read(runtime.getLiveEnabled,'MUSE_LIVE_READ_ENABLED')!=='true')throw new AiError(503,'AI_DISABLED');
@@ -69,14 +96,15 @@ export function registerAi(app:FastifyInstance,runtime:TiktokRuntime){
     let status=200,result:unknown;
     try{result=await service.invoke(client,tool,args);}catch(error){status=error instanceof AiError||error instanceof LiveError?error.status:503;
       await service.audit(client.id,'tool_call',status,isTool(tool)?tool:null,record(args)&&typeof args.shop_id==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(args.shop_id)?args.shop_id:null);throw error;}
+    if(record(result)&&result.error===true)status=502;
     await service.audit(client.id,'tool_call',status,isTool(tool)?tool:null,record(args)&&typeof args.shop_id==='string'?args.shop_id:null);
     app.log.info({event:'ai_tool_read',client_id:client.id,tool,request_status:status},'AI read completed');return result;
   };
   app.get('/api/ai/tools',safe(async request=>{
     const {service,client}=await agent(request);noQuery(request);
-    await service.audit(client.id,'tools_listed',200);return {tools:aiTools.filter(t=>service.allowedTools(client).includes(t.name)),instructions};
+    await service.audit(client.id,'tools_listed',200);return {tools:availableTools().filter(t=>service.allowedTools(client).includes(t.name)),instructions};
   }));
-  app.post('/api/ai/tools/:tool',{bodyLimit:4096},safe(async request=>{
+  app.post('/api/ai/tools/:tool',{bodyLimit:73728},safe(async request=>{
     const {service,client}=await agent(request);noQuery(request);return invoke(service,client,(request.params as {tool:unknown}).tool,request.body);
   }));
   app.get('/api/ai/shops',safe(async request=>{const {service,client}=await agent(request);noQuery(request);return invoke(service,client,'list_shops',{});}));

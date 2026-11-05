@@ -1,12 +1,12 @@
 import {aiTools,isTool,validToken,type AiTool} from './contracts.js';
 
-export function createAiHttpClient(base:string|undefined,token:string|undefined,fetchImpl:typeof fetch=fetch){
+export function createAiHttpClient(base:string|undefined,token:string|undefined,fetchImpl:typeof fetch=fetch,publicAccess=false){
   let origin:URL;try{origin=new URL(base??'');if(origin.protocol!=='https:'||origin.pathname!=='/'||origin.username||origin.password||origin.search||origin.hash)throw new Error();}
   catch{throw new Error('MUSE_ERP_URL must be an HTTPS origin');}
-  if(!validToken(token))throw new Error('MUSE_AI_TOKEN is missing or invalid');
+  if(!publicAccess&&!validToken(token))throw new Error('MUSE_AI_TOKEN is missing or invalid');
   const request=async(path:string,args?:unknown)=>{
     try{
-      const response=await fetchImpl(new URL(path,origin),{method:args===undefined?'GET':'POST',headers:{Authorization:'Bearer '+token,Accept:'application/json','User-Agent':'MUSE-ERP-AI-Bridge/1.0',...(args===undefined?{}:{'Content-Type':'application/json'})},...(args===undefined?{}:{body:JSON.stringify(args)}),redirect:'error',credentials:'omit',signal:AbortSignal.timeout(10000)});
+      const response=await fetchImpl(new URL(path,origin),{method:args===undefined?'GET':'POST',headers:{...(publicAccess?{}:{Authorization:'Bearer '+token}),Accept:'application/json','User-Agent':'MUSE-ERP-AI-Bridge/1.0',...(args===undefined?{}:{'Content-Type':'application/json'})},...(args===undefined?{}:{body:JSON.stringify(args)}),redirect:'error',credentials:'omit',signal:AbortSignal.timeout(10000)});
       if(!response.ok){await response.body?.cancel().catch(()=>{});return {error:true,code:response.status===401?'UNAUTHORIZED':response.status===429?'RATE_LIMITED':'ERP_REQUEST_FAILED',status:response.status};}
       const reader=response.body?.getReader();if(!reader)throw new Error();const chunks:Uint8Array[]=[];let size=0;
       try{while(true){const {value,done}=await reader.read();if(done)break;size+=value.byteLength;if(size>8_000_000)throw new Error();chunks.push(value);}}finally{await reader.cancel().catch(()=>{});}

@@ -16,6 +16,10 @@ export interface TiktokRuntime {
   getLiveEnabled?: () => string | undefined;
   getProductLimit?: () => string | undefined;
   getAiEnabled?: () => string | undefined;
+  getAiPublicEnabled?: () => string | undefined;
+  getOfficialEnabled?: () => string | undefined;
+  getWriteEnabled?: () => string | undefined;
+  getAdminPassword?: () => string | undefined;
   fetchImpl?: typeof fetch; now?: () => number;
 }
 export function registerOAuth(app: FastifyInstance, runtime: TiktokRuntime = {}) {

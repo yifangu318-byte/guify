@@ -13,6 +13,7 @@ import {aiTools} from '../src/ai/contracts.js';
 import {createLiveMcpServer} from '../src/ai/mcp.js';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {InMemoryTransport} from '@modelcontextprotocol/sdk/inMemory.js';
+import {handoffMarkdown} from '../src/ai/handoff.js';
 const admin='synthetic-administrator-01234567890123456789';
 const token='synthetic-ai-dedicated-01234567890123456789';
 const host='erp.example.test';
@@ -178,4 +179,21 @@ test('new read tools require separate grants and strictly validate IDs, store sc
   for(const args of [{shop_id:TARGET.shopId},{shop_id:TARGET.shopId,product_id:9007199254740992},{shop_id:TARGET.shopId,product_id:'p1',page:1},{shop_id:TARGET.shopId,product_id:'p1',order_id:'o1'},{shop_id:TARGET.shopId,product_id:'../p1'},{shop_id:TARGET.shopId,product_id:'p1',url:'http://127.0.0.1'}])assert.equal((await f.call('get_product_detail',args)).statusCode,400);
   assert.equal((await f.call('get_product_detail',{shop_id:'other-shop',product_id:'p1'})).statusCode,403);
   await f.db.prepare("UPDATE authorizations SET scopes_json='[]'").run();assert.equal((await f.call('get_order_detail',{shop_id:TARGET.shopId,order_id:'o1'})).statusCode,403);
+});
+test('public mode explicitly removes AI credentials, expiry and per-client rate limit while leaving admin endpoints protected',async t=>{
+ const f=await setup({getAiPublicEnabled:()=> 'true'});t.after(()=>f.app.close());
+ const response=await f.app.inject({url:'/api/ai/tools',headers:{host}});assert.equal(response.statusCode,200);assert.equal(response.json().tools.length,8);
+ assert.equal((await f.app.inject({url:'/api/ai/shops',headers:{host}})).statusCode,200);
+ assert.equal((await f.app.inject({url:'/api/ai/admin/handoff',headers:{host}})).statusCode,401);
+ assert.equal((await f.app.inject({url:'/api/ai/admin/clients',headers:{host}})).statusCode,401);
+ assert.deepEqual((await f.app.inject('/api/ai/openapi.json')).json().security,[]);
+ assert.equal((await f.db.prepare('SELECT COUNT(*) AS n FROM ai_api_clients').first()).n,0);
+ assert.equal((await f.app.inject({url:'/api/ai/shops',headers:{host,origin:'https://evil.test'}})).statusCode,403);
+});
+test('a configured eight-character management password works only for AI management; handoff is a complete credential-free Markdown attachment',async t=>{
+ const f=await setup({getAdminPassword:()=> 'Small123',getAiPublicEnabled:()=> 'true'});t.after(()=>f.app.close());const headers={host,authorization:'Bearer Small123'};
+ const status=await f.app.inject({url:'/api/ai/admin/status',headers});assert.equal(status.statusCode,200);assert.equal(status.json().public_enabled,true);
+ const doc=await f.app.inject({url:'/api/ai/admin/handoff',headers});assert.equal(doc.statusCode,200);assert.ok(String(doc.headers['content-disposition']).includes('MUSE-AI.md'));assert.ok(doc.body.includes(TARGET.shopId));assert.ok(doc.body.includes('get_product_detail'));assert.ok(doc.body.includes('公开免认证'));assert.ok(!doc.body.includes(admin));assert.ok(!doc.body.includes('Small123'));assert.ok(!doc.body.includes('synthetic-app-secret'));
+ assert.equal((await f.app.inject({url:'/api/live/shops',headers})).statusCode,401);
+ const disabled=handoffMarkdown('https://'+host,[TARGET],false,false,false);assert.ok(disabled.includes('尚未开启公开免认证'));assert.ok(disabled.includes('未开启，不能声称已修改店铺'));
 });

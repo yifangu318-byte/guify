@@ -8,7 +8,7 @@ const cases = [
   ['/web/', 200, 'text/html', body => assert.match(body, /MUSE ERP/)],
   ['/web/orders', 200, 'text/html', body => assert.match(body, /订单列表/)],
   ['/api/shops/demo/orders', 401, 'application/json'],
-  ['/developers', 200, 'text/html', body => assert.match(body, /AI API 接入/)],
+  ['/developers', 200, 'text/html', body => assert.match(body, /下载 AI 接入包/)],
   ['/api/ai/openapi.json', 200, 'application/json', body => assert.equal(Object.keys(JSON.parse(body).paths).length, 8)],
   ['/api/ai/shops/synthetic/products/p1', 401, 'application/json'],
   ['/api/ai/shops/synthetic/orders/o1/status', 401, 'application/json'],

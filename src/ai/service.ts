@@ -8,7 +8,7 @@ export interface AiClientRow {
   id:string; app_hash:string; name:string; token_hash:string; shop_ids_json:string; tools_json:string;
   created_at:number; expires_at:number; revoked_at:number|null; rate_limit:number; rate_window:number; rate_count:number;
 }
-export interface AiOptions {db:LifecycleDb;appKey:string;targets:Target[];live:LiveService;now:()=>number}
+export interface AiOptions {db:LifecycleDb;appKey:string;targets:Target[];live:LiveService;now:()=>number;official?:(target:Target,args:unknown)=>Promise<unknown>}
 const validId = (v:unknown):v is string=>typeof v==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(v);
 function strings(raw:string):string[]{
   const value:unknown=JSON.parse(raw);
@@ -86,6 +86,12 @@ export class AiService {
     if(!isTool(tool))throw new AiError(404,'TOOL_NOT_FOUND');
     if(!this.allowedTools(client).includes(tool))throw new AiError(403,'TOOL_FORBIDDEN');
     if(!record(args))throw new AiError(400,'INVALID_REQUEST');
+    if(tool==='tiktok_request'){
+      const target=this.options.targets.find(t=>t.shopId===args.shop_id&&strings(client.shop_ids_json).includes(t.shopId));
+      if(!target)throw new AiError(403,'SHOP_FORBIDDEN');
+      if(!this.options.official)throw new AiError(503,'OFFICIAL_API_DISABLED');
+      return this.options.official(target,args);
+    }
     if(tool==='list_shops'){
       if(Object.keys(args).length)throw new AiError(400,'INVALID_REQUEST');
       const shops=[];

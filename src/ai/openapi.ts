@@ -1,6 +1,6 @@
 import {aiTools,instructions} from './contracts.js';
 export const aiOpenApi = {
-  openapi:'3.1.0',info:{title:'MUSE ERP AI read API',version:'1.1.0',description:instructions},
+  openapi:'3.1.0',info:{title:'MUSE ERP AI API',version:'2.0.0',description:instructions},
   servers:[{url:'https://senaloerp.online'}],security:[{aiBearer:[]}],
   components:{securitySchemes:{aiBearer:{type:'http',scheme:'bearer',description:'A dedicated, scoped AI credential. Never use the ERP administrator or TikTok token.'}},
     schemas:{Error:{type:'object',required:['error','code','message','request_id'],properties:{error:{const:true},code:{type:'string'},message:{type:'string'},request_id:{type:'string'}}}}},
